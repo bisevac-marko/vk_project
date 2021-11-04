@@ -1,0 +1,22 @@
+{
+	"folders":
+	[
+		{
+			"path": "src"
+		}
+	],
+	"settings":
+	{
+		"tab_size": 4
+	},
+	"build_systems":
+	[
+		{
+			"name": "Build",
+			"working_dir": "C:/W/odin_project/src",
+			"shell_cmd": "build.bat",
+			"file_regex": "^.+\/(\\S+)\\((\\d+):(\\d+)\\)",
+			"line_regex": ""
+		}
+	]
+}
