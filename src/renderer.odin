@@ -21,7 +21,7 @@ Mesh :: struct {
     handle: Handle,
 }
 
-PushConstants :: struct {
+Push_Constants :: struct {
     data: vec4,
     render_matrix: mat4,
 }

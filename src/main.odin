@@ -331,7 +331,7 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
     viewport: vk.Viewport = {
         x = 0.0,
         y = 0.0,
-        width = f32(vulkan_state.window_extent.width),
+        width  = f32(vulkan_state.window_extent.width),
         height = f32(vulkan_state.window_extent.height),
         minDepth = 0.0,
         maxDepth = 1.0,
@@ -343,7 +343,9 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
     };
     
     
-    // It is possible to use multiple viewports and scissor rectangles on some graphics cards, so its members reference an array of them. Using multiple requires enabling a GPU feature (see logical device creation).
+    // It is possible to use multiple viewports and scissor rectangles on some graphics cards, 
+    // so its members reference an array of them. Using multiple requires enabling
+    // a GPU feature (see logical device creation).
     viewport_state_create_info: vk.PipelineViewportStateCreateInfo = {
         sType = .PIPELINE_VIEWPORT_STATE_CREATE_INFO,
         viewportCount = 1,
@@ -357,7 +359,7 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
         depthClampEnable = false,
         rasterizerDiscardEnable = false,
         // Using any mode other than fill requires enabling a GPU feature.
-        polygonMode = .LINE,
+        polygonMode = .FILL,
         lineWidth = 1.0,
         cullMode = {.BACK},
         frontFace = .CLOCKWISE,
@@ -399,16 +401,16 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
     
     // Push constants
     push_constant: vk.PushConstantRange = {
-        size   = size_of(PushConstants),
+        size       = size_of(Push_Constants),
         stageFlags = {.VERTEX},
     };
     
     // This struct is for passing dynamic information to shaders
     pipeline_layout_create_info: vk.PipelineLayoutCreateInfo = {
-        sType = .PIPELINE_LAYOUT_CREATE_INFO,
-        pSetLayouts = nil, // Optional
-        setLayoutCount = 0, // Optional
-        pPushConstantRanges = &push_constant, // Optional
+        sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
+        pSetLayouts            = nil, // Optional
+        setLayoutCount         = 0, // Optional
+        pPushConstantRanges    = &push_constant, // Optional
         pushConstantRangeCount = 1, // Optional
     };
     
@@ -602,7 +604,6 @@ create_swapchain:: proc(vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) 
             }
             
         }
-        
         
         create_info := vk.SwapchainCreateInfoKHR {
             sType = .SWAPCHAIN_CREATE_INFO_KHR,
@@ -1011,13 +1012,16 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
     // triangle_mesh.vertices[1].color = {0.1, 0.2, 0.0};
     // triangle_mesh.vertices[2].color = {0.1, 0.2, 0.0};
     
-    some_mesh = obj_read("assets/cube.obj");
+    some_mesh = obj_read("assets/monkey.obj");
+
+    for vertex, idx in some_mesh.vertices {
+        some_mesh.vertices[idx].color = vertex.normal;
+    }
 
     size := vk.DeviceSize(len(some_mesh.vertices) * size_of(Vertex));
-    fmt.println("vertex len", len(some_mesh.vertices), "size ", size_of(Vertex));
     vertex_buffer = create_buffer(vulkan_state, &some_mesh.vertices[0], size, .VERTEX_BUFFER);
+
     size  = vk.DeviceSize(len(some_mesh.indices) * size_of(u32));
-    fmt.println("index len", len(some_mesh.indices), "size ", size_of(u32));
     index_buffer = create_buffer(vulkan_state, &some_mesh.indices[0], size, .INDEX_BUFFER);
 }
 
@@ -1043,9 +1047,9 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State) {
     }
     
     clear_color_value : vk.ClearColorValue;
-    clear_color_value.float32[0] = 0.0;
-    clear_color_value.float32[1] = 0.5;
-    clear_color_value.float32[2] = 0.0;
+    clear_color_value.float32[0] = 0.2;
+    clear_color_value.float32[1] = 0.2;
+    clear_color_value.float32[2] = 0.2;
     clear_color_value.float32[3] = 1.0;
     
     clear_value : vk.ClearValue;
@@ -1074,20 +1078,20 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State) {
     vk.CmdBindIndexBuffer(cmd_buffer, index_buffer.buffer, 0, .UINT32);
 
     // Computing push constants
-    cam_pos: vec3 = {0, 0, -3};
+    cam_pos: vec3 = {0, 0, -2};
 
     view := la.matrix4_translate(cam_pos)
     projection := la.matrix4_perspective_f32(math.to_radians_f32(90), 640.0/480.0, 0.1, 1000);
-    model := la.matrix4_rotate(math.to_radians_f32(30.0), vec3{0, 1, 0});
+    model := la.matrix4_rotate(math.to_radians_f32(20.0), vec3{0, 1, 0});
     mesh_matrix := la.matrix_mul(la.matrix_mul(projection, view), model);
 
     // mesh_matrix = la.MATRIX4F32_IDENTITY;
 
-    push_constants: PushConstants;
+    push_constants: Push_Constants;
     push_constants.render_matrix = mesh_matrix;
 
 
-    vk.CmdPushConstants(cmd_buffer, pipeline_layout, {.VERTEX}, 0, size_of(PushConstants), &push_constants)
+    vk.CmdPushConstants(cmd_buffer, pipeline_layout, {.VERTEX}, 0, size_of(Push_Constants), &push_constants)
     
     vk.CmdDrawIndexed(cmd_buffer, u32(len(some_mesh.indices)), 1, 0, 0, 0);
     
@@ -1170,9 +1174,10 @@ main :: proc() {
     
     if glfw.VulkanSupported() == false {
         fmt.println("Vulkan is unsuported.");
+        glfw.Terminate();
     }
     
-    for ;glfw.WindowShouldClose(window) == false; {
+    for ;!glfw.WindowShouldClose(window); {
         glfw.PollEvents();
         draw_frame(vulkan_state);
     }
