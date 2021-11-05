@@ -30,33 +30,33 @@ obj_read:: proc(file_name: string) -> (mesh: Mesh) {
     assert(ok);
     info := get_info(buf);
     
-    mesh.vertices = make([dynamic]Vertex, info.face_count * 3);
-    mesh.indices  = make([dynamic]u32, info.face_count * 3);
+    mesh.vertices = make([dynamic]Vertex, 0, info.face_count * 3);
+    mesh.indices  = make([dynamic]u32, 0, info.face_count * 3);
     
-    obj_positions := make([dynamic]vec3, info.vertex_count, context.temp_allocator);
-    obj_normals   := make([dynamic]vec3, info.normal_count, context.temp_allocator);
-    obj_uvs       := make([dynamic]vec2, info.uv_count,     context.temp_allocator);
+    obj_positions := make([dynamic]vec3, 0, info.vertex_count, context.temp_allocator);
+    obj_normals   := make([dynamic]vec3, 0, info.normal_count, context.temp_allocator);
+    obj_uvs       := make([dynamic]vec2, 0, info.uv_count,     context.temp_allocator);
     index_map     := make_map(map[ivec3]u32, info.face_count, context.temp_allocator);
     
     
     reader := create_reader(string(buf));
     
     for ;; {
-        word, eof  := next_word(&reader);
+        word, eof  := parse_word(&reader);
         switch word {
             case "v": {
                 v: vec3;
-                v, eof = next_vec(&reader, vec3);
+                v, eof = parse_vec(&reader, vec3);
                 append_elem(&obj_positions, v);
             }
             case "vn": {
                 v: vec3;
-                v, eof = next_vec(&reader, vec3);
+                v, eof = parse_vec(&reader, vec3);
                 append_elem(&obj_normals, v);
             }
             case "vt": {
                 v: vec2;
-                v, eof = next_vec(&reader, vec2);
+                v, eof = parse_vec(&reader, vec2);
                 append_elem(&obj_uvs, v);
             }
             case "f": {
@@ -76,10 +76,10 @@ obj_read:: proc(file_name: string) -> (mesh: Mesh) {
                         index = u32(len(mesh.vertices));
                         index_map[key] = index;
                         vertex: Vertex;
-                        vertex.pos = obj_positions[face.position_indices[i]];
+                        vertex.pos    = obj_positions[face.position_indices[i]];
                         vertex.normal = obj_normals[face.normal_indices[i]]; 
-                        vertex.uv = obj_uvs[face.uv_indices[i]];
-                        vertex.color = {1,1,1};
+                        vertex.uv     = obj_uvs[face.uv_indices[i]];
+                        vertex.color  = {1,1,1};
                         
                         append_elem(&mesh.vertices, vertex);
                     }
@@ -114,7 +114,7 @@ increment_reader:: proc(r: ^OBJ_Reader) -> b32 {
 }
 
 @(private)
-next_word:: proc(r: ^OBJ_Reader) -> (str: string, eof: bool) {
+parse_word:: proc(r: ^OBJ_Reader) -> (str: string, eof: bool) {
     // Skip whitespace
     eof = false;
     for ;is_whitespace(r.s[r.i]); {
@@ -149,7 +149,7 @@ get_info:: proc(buf: []byte) -> (info: OBJ_File_Info) {
     
     reader := create_reader(string(buf));
     for ;; {
-        word, eof := next_word(&reader);
+        word, eof := parse_word(&reader);
         
         switch word {
             case "v":
@@ -171,9 +171,9 @@ get_info:: proc(buf: []byte) -> (info: OBJ_File_Info) {
 }
 
 @(private)
-next_float:: proc(r: ^OBJ_Reader) -> (f: f32, eof: bool) {
+parse_float:: proc(r: ^OBJ_Reader) -> (f: f32, eof: bool) {
     s: string;
-    s, eof = next_word(r);
+    s, eof = parse_word(r);
     ok: bool;
     f, ok = strconv.parse_f32(s);
     assert(ok);
@@ -182,9 +182,9 @@ next_float:: proc(r: ^OBJ_Reader) -> (f: f32, eof: bool) {
 }
 
 @(private)
-next_vec:: proc(r: ^OBJ_Reader, $T: typeid) -> (v: T, eof: bool) {
+parse_vec:: proc(r: ^OBJ_Reader, $T: typeid) -> (v: T, eof: bool) {
     for i in 0..<(size_of(T)/size_of(f32)) {
-        v[i], eof = next_float(r);
+        v[i], eof = parse_float(r);
     }
     return v, eof;
 }
@@ -194,7 +194,7 @@ parse_face:: proc(r: ^OBJ_Reader) -> (face: OBJ_Face, eof: bool) {
     
     for i in 0..2 {
         word: string;
-        word, eof = next_word(r);
+        word, eof = parse_word(r);
         split := str.split(word, "/", context.temp_allocator);
         assert(len(split) == 3);
         

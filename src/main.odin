@@ -26,7 +26,7 @@ GPU_Device :: struct {
 
 Buffer :: struct {
     memory: vk.DeviceMemory,
-    vertex_buffer: vk.Buffer,
+    buffer: vk.Buffer,
 }
 
 Vulkan_State :: struct {
@@ -38,7 +38,8 @@ Vulkan_State :: struct {
     graphics_queue: vk.Queue,
     present_queue: vk.Queue,
     
-    buffer: Buffer,
+    vertex_buffer: Buffer,
+    index_buffer: Buffer,
     
     surface: vk.SurfaceKHR,
     
@@ -66,6 +67,7 @@ Vulkan_State :: struct {
     debug_messenger: vk.DebugUtilsMessengerEXT,
     
     triangle_mesh: Mesh,
+    some_mesh: Mesh,
 }
 
 Swap_Chain_Support_Info :: struct {
@@ -128,8 +130,9 @@ find_queue_families:: proc(device: vk.PhysicalDevice, surface: vk.SurfaceKHR) ->
     vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, nil);
     
     queue_families := make([dynamic]vk.QueueFamilyProperties, 
-                                             queue_family_count, 
-                                             context.temp_allocator);
+                                            queue_family_count,
+                                            queue_family_count, 
+                                            context.temp_allocator);
     vk.GetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, &queue_families[0]);
     
     for i: u32 = 0; i < queue_family_count; i += 1 {
@@ -156,6 +159,7 @@ check_device_extensions:: proc(device: vk.PhysicalDevice) -> b32{
     extension_count: u32;
     vk.EnumerateDeviceExtensionProperties(device, nil, &extension_count, nil);
     available_extensions := make([dynamic]vk.ExtensionProperties, 
+                                                   extension_count, 
                                                    extension_count,
                                                    context.temp_allocator);
     vk.EnumerateDeviceExtensionProperties(device, nil, &extension_count, &available_extensions[0]);
@@ -188,6 +192,7 @@ get_swap_chain_support_info:: proc(device: vk.PhysicalDevice, surface: vk.Surfac
     if format_count != 0 {
         result.formats = make([dynamic]vk.SurfaceFormatKHR, 
                                                 format_count,
+                                                format_count,
                                                 context.temp_allocator);
         vk.GetPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, &result.formats[0]);
     }
@@ -196,6 +201,7 @@ get_swap_chain_support_info:: proc(device: vk.PhysicalDevice, surface: vk.Surfac
     
     if present_mode_count != 0 {
         result.present_modes = make([dynamic]vk.PresentModeKHR, 
+                                                      present_mode_count,
                                                       present_mode_count,
                                                       context.temp_allocator);
         vk.GetPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, &result.present_modes[0]);
@@ -351,7 +357,7 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
         depthClampEnable = false,
         rasterizerDiscardEnable = false,
         // Using any mode other than fill requires enabling a GPU feature.
-        polygonMode = .FILL,
+        polygonMode = .LINE,
         lineWidth = 1.0,
         cullMode = {.BACK},
         frontFace = .CLOCKWISE,
@@ -446,7 +452,7 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
 create_framebuffers:: proc(using vulkan_state: ^Vulkan_State) {
     
     count:= len(swap_chain_images);
-    swap_chain_framebuffers = make([dynamic]vk.Framebuffer, count);
+    swap_chain_framebuffers = make([dynamic]vk.Framebuffer, count, count);
     
     for  i := 0; i < count; i += 1 {
         
@@ -490,7 +496,7 @@ create_command_pool:: proc(vulkan_state: ^Vulkan_State) {
 create_command_buffers:: proc(vulkan_state: ^Vulkan_State) {
     
     framebuffer_count := len(vulkan_state.swap_chain_framebuffers);
-    vulkan_state.command_buffers = make([dynamic]vk.CommandBuffer, framebuffer_count);
+    vulkan_state.command_buffers = make([dynamic]vk.CommandBuffer, framebuffer_count, framebuffer_count);
     
     alloc_info: vk.CommandBufferAllocateInfo = {
         sType = .COMMAND_BUFFER_ALLOCATE_INFO,
@@ -517,9 +523,9 @@ create_sync_stuff:: proc(vulkan_state: ^Vulkan_State) {
     };
     using vulkan_state;
     /*
-    image_available_semaphore = make([dynamic]vk.Semaphore, MAX_FRAMES_IN_FLIGHT);
-    render_finished_semaphore = make([dynamic]vk.Semaphore, MAX_FRAMES_IN_FLIGHT);
-    fences                    = make([dynamic]vk.Fence, MAX_FRAMES_IN_FLIGHT);
+    image_available_semaphore = make([dynamic]vk.Semaphore, ,0 MAX_FRAMES_IN_FLIGHT);
+    render_finished_semaphore = make([dynamic]vk.Semaphore, ,0 MAX_FRAMES_IN_FLIGHT);
+    fences                    = make([dynamic]vk.Fence, ,0 MAX_FRAMES_IN_FLIGHT);
 */
     
     if (vk.CreateSemaphore(gpu.device, &semaphore_create_info, nil, &render_semaphore) != .SUCCESS ||
@@ -646,13 +652,12 @@ create_swapchain:: proc(vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) 
         
         the_image_count: u32;
         vk.GetSwapchainImagesKHR(gpu.device, swap_chain, &the_image_count, nil);
-        swap_chain_images = make([dynamic]vk.Image, the_image_count);
+        swap_chain_images = make([dynamic]vk.Image, the_image_count, the_image_count);
         vk.GetSwapchainImagesKHR(gpu.device, swap_chain, &image_count, &swap_chain_images[0]);
     }
     // Creating image views
     {
-        vulkan_state.swap_chain_image_views = make([dynamic]vk.ImageView, 
-                                                                     len(swap_chain_images));
+        vulkan_state.swap_chain_image_views = make([dynamic]vk.ImageView, len(swap_chain_images), len(swap_chain_images));
         for image_idx := 0; image_idx < len(swap_chain_images); image_idx += 1 {
             create_info := vk.ImageViewCreateInfo {
                 sType                 = .IMAGE_VIEW_CREATE_INFO,
@@ -684,7 +689,8 @@ create_swapchain:: proc(vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) 
 get_vertex_description:: proc() -> Vertex_Description {
     
 	description: Vertex_Description;
-    
+    description.bindings   = make([dynamic]vk.VertexInputBindingDescription, context.temp_allocator);   
+    description.attributes = make([dynamic]vk.VertexInputAttributeDescription, context.temp_allocator);   
 	//we will have just 1 vertex buffer binding, with a per-vertex rate
 	main_binding: vk.VertexInputBindingDescription = {
         binding   = 0,
@@ -698,34 +704,17 @@ get_vertex_description:: proc() -> Vertex_Description {
     type_info := type_info_base(type_info_of(Vertex));
     struct_info := type_info.variant.(Type_Info_Struct);
     
-	//Position will be stored at Location 0
-	pos_attribute : vk.VertexInputAttributeDescription = {
-        binding = 0,
-        location = 0,
-        format = .R32G32B32_SFLOAT,
-        offset = u32(struct_info.offsets[0]),
+    // position - normal - uv - color
+    for offset, idx in struct_info.offsets {
+        attribute : vk.VertexInputAttributeDescription = {
+            binding = 0,
+            location = u32(idx),
+            format = .R32G32B32_SFLOAT,
+            offset = u32(struct_info.offsets[idx]),
+        };
+        append_elem(&description.attributes, attribute);
     }
-    
-    //Normal will be stored at Location 1
-	normal_attribute: vk.VertexInputAttributeDescription = {
-        binding = 0,
-        location = 1,
-        format = .R32G32B32_SFLOAT,
-        offset = u32(struct_info.offsets[1]),
-    };
-    
-    // Color will be stored at Location 
-	color_attribute: vk.VertexInputAttributeDescription = {
-        binding = 0,
-        location = 2,
-        format = .R32G32B32_SFLOAT,
-        offset = u32(struct_info.offsets[2]),
-    };
-    
-    append_elem(&description.attributes, pos_attribute);
-    append_elem(&description.attributes, normal_attribute);
-    append_elem(&description.attributes, color_attribute);
-	
+
 	return description;
 }
 
@@ -741,7 +730,8 @@ create_sutable_device:: proc(vulkan_state: ^Vulkan_State) {
         assert(false);
     }
     
-    devices := make([dynamic]vk.PhysicalDevice, 
+    devices := make([dynamic]vk.PhysicalDevice,
+                                      device_count,
                                       device_count,
                                       context.temp_allocator);
     vk.EnumeratePhysicalDevices(instance, &device_count, &devices[0]);
@@ -861,31 +851,34 @@ allocate_gpu_memory:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequirem
 }
 
 // TODO(mb): Right now we only have 1 vertex buffer
-create_vertex_buffer:: proc(using vulkan_state: ^Vulkan_State, mesh: ^Mesh) {
+create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.DeviceSize, usage: vk.BufferUsageFlag) -> (buffer: Buffer) {
     
     buffer_info: vk.BufferCreateInfo = {
         sType       = .BUFFER_CREATE_INFO,
-        size        = vk.DeviceSize(len(mesh.vertices) * size_of(Vertex)),
-        usage       = {.VERTEX_BUFFER},
+        size        = size,
+        usage       = {usage},
     };
-    
-    if vk.CreateBuffer(gpu.device, &buffer_info, nil, &buffer.vertex_buffer) != .SUCCESS {
+
+
+    if vk.CreateBuffer(gpu.device, &buffer_info, nil, &buffer.buffer) != .SUCCESS {
         fmt.println("[Vulkan] Failed to create buffer!");
     }
     
     mem_requirements: vk.MemoryRequirements;
-    vk.GetBufferMemoryRequirements(gpu.device, buffer.vertex_buffer, &mem_requirements);
+    vk.GetBufferMemoryRequirements(gpu.device, buffer.buffer, &mem_requirements);
     
     buffer.memory = allocate_gpu_memory(&gpu, mem_requirements);
     
-    vk.BindBufferMemory(gpu.device, buffer.vertex_buffer, buffer.memory, 0);
+    vk.BindBufferMemory(gpu.device, buffer.buffer, buffer.memory, 0);
     
-    data: rawptr;
-    vk.MapMemory(gpu.device, buffer.memory, 0, buffer_info.size, {}, &data);
+    gpu_data: rawptr;
+    vk.MapMemory(gpu.device, buffer.memory, 0, buffer_info.size, {}, &gpu_data);
     
-    mem.copy(data, &mesh.vertices[0], int(buffer_info.size));
+    mem.copy(gpu_data, data, int(buffer_info.size));
     
     vk.UnmapMemory(gpu.device, buffer.memory);
+
+    return buffer;
 }
 
 
@@ -939,6 +932,7 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
         vk.EnumerateInstanceLayerProperties(&layer_count, nil);
         
         available_layers := make([dynamic]vk.LayerProperties, 
+                                                   layer_count,
                                                    layer_count,
                                                    context.temp_allocator);
         
@@ -1009,16 +1003,22 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
     create_command_buffers(vulkan_state);
     create_sync_stuff(vulkan_state);
     
-    triangle_mesh.vertices = make([dynamic]Vertex, 3);
-    triangle_mesh.vertices[0].pos = { 1,  1, 0}; 
-    triangle_mesh.vertices[1].pos = {-1,  1, 0}; 
-    triangle_mesh.vertices[2].pos = { 0, -1, 0}; 
+    // triangle_mesh.vertices = make([dynamic]Vertex, 3);
+    // triangle_mesh.vertices[0].pos = { 1,  1, 0}; 
+    // triangle_mesh.vertices[1].pos = {-1,  1, 0}; 
+    // triangle_mesh.vertices[2].pos = { 0, -1, 0}; 
+    // triangle_mesh.vertices[0].color = {0.1, 0.2, 0.0};
+    // triangle_mesh.vertices[1].color = {0.1, 0.2, 0.0};
+    // triangle_mesh.vertices[2].color = {0.1, 0.2, 0.0};
     
-    triangle_mesh.vertices[0].color = {0.1, 0.2, 0.0};
-    triangle_mesh.vertices[1].color = {0.1, 0.2, 0.0};
-    triangle_mesh.vertices[2].color = {0.1, 0.2, 0.0};
-    
-    create_vertex_buffer(vulkan_state, &vulkan_state.triangle_mesh);
+    some_mesh = obj_read("assets/cube.obj");
+
+    size := vk.DeviceSize(len(some_mesh.vertices) * size_of(Vertex));
+    fmt.println("vertex len", len(some_mesh.vertices), "size ", size_of(Vertex));
+    vertex_buffer = create_buffer(vulkan_state, &some_mesh.vertices[0], size, .VERTEX_BUFFER);
+    size  = vk.DeviceSize(len(some_mesh.indices) * size_of(u32));
+    fmt.println("index len", len(some_mesh.indices), "size ", size_of(u32));
+    index_buffer = create_buffer(vulkan_state, &some_mesh.indices[0], size, .INDEX_BUFFER);
 }
 
 draw_frame:: proc(using vulkan_state: ^Vulkan_State) {
@@ -1069,19 +1069,16 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State) {
     vk.CmdBindPipeline(cmd_buffer, .GRAPHICS, graphics_pipeline);
     
     offset: []vk.DeviceSize = {0};
-    vk.CmdBindVertexBuffers(cmd_buffer, 0, 1, &buffer.vertex_buffer, &offset[0]);
+    vk.CmdBindVertexBuffers(cmd_buffer, 0, 1, &vertex_buffer.buffer, &offset[0]);
+
+    vk.CmdBindIndexBuffer(cmd_buffer, index_buffer.buffer, 0, .UINT32);
 
     // Computing push constants
-
-    cam_pos: vec3 = {0, 0, -2};
+    cam_pos: vec3 = {0, 0, -3};
 
     view := la.matrix4_translate(cam_pos)
     projection := la.matrix4_perspective_f32(math.to_radians_f32(90), 640.0/480.0, 0.1, 1000);
-    // projection := la.matrix_ortho3d_f32(0.0, 640.0, 0.0, 480.0, 0.1, 1000.0);
-    // projection[2][2] *= -1;
-    // projection[2][3] *= -1;
-    //model := la.matrix4_rotate(math.to_radians_f32(30), vec3({0, 1, 0}));
-    model := la.matrix4_translate(vec3{1, 0, 0});
+    model := la.matrix4_rotate(math.to_radians_f32(30.0), vec3{0, 1, 0});
     mesh_matrix := la.matrix_mul(la.matrix_mul(projection, view), model);
 
     // mesh_matrix = la.MATRIX4F32_IDENTITY;
@@ -1092,7 +1089,7 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State) {
 
     vk.CmdPushConstants(cmd_buffer, pipeline_layout, {.VERTEX}, 0, size_of(PushConstants), &push_constants)
     
-    vk.CmdDraw(cmd_buffer, u32(len(triangle_mesh.vertices)), 1, 0, 0);
+    vk.CmdDrawIndexed(cmd_buffer, u32(len(some_mesh.indices)), 1, 0, 0, 0);
     
     vk.CmdEndRenderPass(cmd_buffer);
     
@@ -1153,8 +1150,6 @@ main :: proc() {
     
     vulkan_state := new(Vulkan_State);
     window: glfw.WindowHandle;
-    
-    mesh := obj_read("assets/cube.obj");
     
     mem.end_arena_temp_memory(temp_memory);
     
