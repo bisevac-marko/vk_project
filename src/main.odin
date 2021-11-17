@@ -29,6 +29,11 @@ Buffer :: struct {
     buffer: vk.Buffer,
 }
 
+Image :: struct {
+    memory: vk.DeviceMemory,
+    image: vk.Image,
+}
+
 Vulkan_State :: struct {
     
     instance: vk.Instance,
@@ -65,6 +70,10 @@ Vulkan_State :: struct {
     render_fence: vk.Fence,
     
     debug_messenger: vk.DebugUtilsMessengerEXT,
+
+    depth_image: Image,
+    depth_image_view: vk.ImageView,
+    depth_format: vk.Format,
     
     triangle_mesh: Mesh,
     some_mesh: Mesh,
@@ -230,7 +239,7 @@ create_shader_module:: proc(device: vk.Device, shader_code: []byte) -> vk.Shader
 
 create_render_pass:: proc(vulkan_state: ^Vulkan_State) {
     
-    attachment_description: vk.AttachmentDescription = {
+    color_attachment: vk.AttachmentDescription = {
         format  = vulkan_state.swap_chain_format,
         samples = {._1},
         loadOp =  .CLEAR,
@@ -241,16 +250,12 @@ create_render_pass:: proc(vulkan_state: ^Vulkan_State) {
         finalLayout = .PRESENT_SRC_KHR,
     };
     
+
     color_attachment_ref: vk.AttachmentReference = {
         attachment = 0,
         layout = .COLOR_ATTACHMENT_OPTIMAL,
     };
-    
-    subpass: vk.SubpassDescription = {
-        pipelineBindPoint = .GRAPHICS,
-        colorAttachmentCount = 1,
-        pColorAttachments = &color_attachment_ref,
-    };
+
     
     dependency: vk.SubpassDependency = {
         srcSubpass = vk.SUBPASS_EXTERNAL,
@@ -259,10 +264,37 @@ create_render_pass:: proc(vulkan_state: ^Vulkan_State) {
         dstAccessMask = {.COLOR_ATTACHMENT_WRITE},
     };
     
+
+    depth_attachment: vk.AttachmentDescription = {
+        format = vulkan_state.depth_format,
+        samples = {._1},
+        loadOp = .CLEAR,
+        storeOp = .STORE,
+        stencilLoadOp = .CLEAR,
+        stencilStoreOp = .DONT_CARE,
+        initialLayout = .UNDEFINED,
+        finalLayout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    };
+
+    depth_attachment_ref: vk.AttachmentReference = {
+        attachment = 1,
+        layout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+    }
+
+
+    subpass: vk.SubpassDescription = {
+        pipelineBindPoint = .GRAPHICS,
+        colorAttachmentCount = 1,
+        pColorAttachments = &color_attachment_ref,
+        pDepthStencilAttachment = &depth_attachment_ref,
+    };
+    
+    attachments : []vk.AttachmentDescription = {color_attachment, depth_attachment};
+
     render_pass_info: vk.RenderPassCreateInfo = {
         sType = .RENDER_PASS_CREATE_INFO,
-        attachmentCount = 1,
-        pAttachments = &attachment_description,
+        attachmentCount = 2,
+        pAttachments = &attachments[0],
         subpassCount = 1,
         pSubpasses = &subpass,
         dependencyCount = 1,
@@ -404,7 +436,7 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
         size       = size_of(Push_Constants),
         stageFlags = {.VERTEX},
     };
-    
+
     // This struct is for passing dynamic information to shaders
     pipeline_layout_create_info: vk.PipelineLayoutCreateInfo = {
         sType                  = .PIPELINE_LAYOUT_CREATE_INFO,
@@ -418,10 +450,22 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
     if vk.CreatePipelineLayout(vulkan_state.gpu.device, &pipeline_layout_create_info, nil, &vulkan_state.pipeline_layout) != .SUCCESS {
         
         fmt.println("[Vulkan] Failed to create pipeline layout!");
-        assert(false);
     }
     
     shader_stages := []vk.PipelineShaderStageCreateInfo {frag_create_info, vert_create_info};
+
+    // Depth testing
+    depth_stencil_info: vk.PipelineDepthStencilStateCreateInfo = {
+        sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        depthTestEnable = true,
+        depthWriteEnable = true,
+        depthCompareOp = .LESS_OR_EQUAL,
+        depthBoundsTestEnable = false,
+        minDepthBounds = 0.0, // Optional
+        maxDepthBounds = 1.0, // Optional
+        stencilTestEnable = false,
+    }
+    
     
     pipeline_create_info: vk.GraphicsPipelineCreateInfo = {
         sType                  = .GRAPHICS_PIPELINE_CREATE_INFO,
@@ -432,7 +476,7 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
         pViewportState         = &viewport_state_create_info,
         pRasterizationState    = &rasterizer,
         pMultisampleState      = &multisampling,
-        pDepthStencilState     = nil, // Optional
+        pDepthStencilState     = &depth_stencil_info, // Optional
         pColorBlendState       = &color_blend_state_create_info,
         pDynamicState          = nil, // Optional
         
@@ -460,12 +504,13 @@ create_framebuffers:: proc(using vulkan_state: ^Vulkan_State) {
         
         attachments: []vk.ImageView = {
             swap_chain_image_views[i],
+            depth_image_view,
         };
         
         framebuffer_info: vk.FramebufferCreateInfo = {
             sType           = .FRAMEBUFFER_CREATE_INFO,
             renderPass      = render_pass,
-            attachmentCount = 1,
+            attachmentCount = 2,
             pAttachments    = &attachments[0],
             width           = window_extent.width,
             height          = window_extent.height,
@@ -687,6 +732,66 @@ create_swapchain:: proc(vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) 
     }
 }
 
+create_image:: proc(using vulkan_state: ^Vulkan_State, frmat: vk.Format, width, height: u32, usage_flags: vk.ImageUsageFlags, memory_flags: vk.MemoryPropertyFlags) -> (image: Image) {
+
+    image_info: vk.ImageCreateInfo = {
+        sType = .IMAGE_CREATE_INFO,
+        pNext = nil,
+        imageType = vk.ImageType.D2,
+        format = frmat,
+        extent = {width, height, 1},
+        mipLevels = 1,
+        arrayLayers = 1,
+        samples = {._1},
+        tiling = .OPTIMAL,
+        usage = usage_flags,
+    };
+
+
+   if vk.CreateImage(gpu.device, &image_info, nil, &image.image) != .SUCCESS {
+        fmt.println("Failed to create image!");
+    }
+
+    mem_requirements: vk.MemoryRequirements;
+    vk.GetImageMemoryRequirements(gpu.device, image.image, &mem_requirements);
+    memory := allocate_gpu_memory(&gpu, mem_requirements, memory_flags);
+
+    image.memory = memory
+    vk.BindImageMemory(gpu.device, image.image, image.memory, 0);
+
+    return image;
+}
+
+create_depthbuffer:: proc(using vulkan_state: ^Vulkan_State, aspect_flags: vk.ImageAspectFlags) {
+
+    // Depth format is hardcoded to 32 bit float now, may need to check for supported
+    // format if this one is unsupported?
+    depth_format = .D32_SFLOAT;
+
+    // For depth buffer, local memory should be used for performance reasons
+    depth_image = create_image(vulkan_state, depth_format, window_extent.width, window_extent.height, {.DEPTH_STENCIL_ATTACHMENT}, {.DEVICE_LOCAL})
+
+    image_view_info : vk.ImageViewCreateInfo = {
+        sType = .IMAGE_VIEW_CREATE_INFO,
+        pNext = nil,
+        viewType = .D2,
+        image = depth_image.image,
+        format = depth_format,
+        subresourceRange     = {
+            baseMipLevel   = 0, 
+            levelCount     = 1, 
+            baseArrayLayer = 0, 
+            layerCount     = 1,
+            aspectMask     = aspect_flags,
+        },
+    };
+
+    if vk.CreateImageView(gpu.device, &image_view_info, nil, &depth_image_view) != .SUCCESS {
+        fmt.println("Failed to create image view!");
+    }
+
+}
+
 get_vertex_description:: proc() -> Vertex_Description {
     
 	description: Vertex_Description;
@@ -809,17 +914,16 @@ create_sutable_device:: proc(vulkan_state: ^Vulkan_State) {
     }
 }
 
-get_memory_type_index:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequirements) -> u32 {
+get_memory_type_index:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequirements, property_flags: vk.MemoryPropertyFlags) -> u32 {
     
     mem_properties :vk.PhysicalDeviceMemoryProperties; 
     vk.GetPhysicalDeviceMemoryProperties(gpu.physical_device, &mem_properties);
     
-    properties: vk.MemoryPropertyFlags = {.HOST_VISIBLE, .HOST_COHERENT}
     index : u32 = misc.U32_MAX;
     
     for i : u32 = 0; i < mem_properties.memoryTypeCount; i += 1 {
         can_use := bool(mem_requirements.memoryTypeBits & (1 << i));
-        can_use &= mem_properties.memoryTypes[i].propertyFlags & properties != {};
+        can_use &= mem_properties.memoryTypes[i].propertyFlags & property_flags != {};
         
         if can_use {
             index = i;
@@ -832,11 +936,11 @@ get_memory_type_index:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequir
     return index;
 }
 
-allocate_gpu_memory:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequirements) -> vk.DeviceMemory {
+allocate_gpu_memory:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequirements, memory_flags: vk.MemoryPropertyFlags) -> vk.DeviceMemory {
     
     result: vk.DeviceMemory;
     
-    mem_type_index := get_memory_type_index(gpu, mem_requirements);
+    mem_type_index := get_memory_type_index(gpu, mem_requirements, memory_flags);
     
     alloc_info: vk.MemoryAllocateInfo = {
         sType = .MEMORY_ALLOCATE_INFO,
@@ -851,7 +955,7 @@ allocate_gpu_memory:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequirem
     return result;
 }
 
-// TODO(mb): Right now we only have 1 vertex buffer
+
 create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.DeviceSize, usage: vk.BufferUsageFlag) -> (buffer: Buffer) {
     
     buffer_info: vk.BufferCreateInfo = {
@@ -860,7 +964,6 @@ create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.D
         usage       = {usage},
     };
 
-
     if vk.CreateBuffer(gpu.device, &buffer_info, nil, &buffer.buffer) != .SUCCESS {
         fmt.println("[Vulkan] Failed to create buffer!");
     }
@@ -868,7 +971,7 @@ create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.D
     mem_requirements: vk.MemoryRequirements;
     vk.GetBufferMemoryRequirements(gpu.device, buffer.buffer, &mem_requirements);
     
-    buffer.memory = allocate_gpu_memory(&gpu, mem_requirements);
+    buffer.memory = allocate_gpu_memory(&gpu, mem_requirements, {.HOST_VISIBLE, .HOST_COHERENT});
     
     vk.BindBufferMemory(gpu.device, buffer.buffer, buffer.memory, 0);
     
@@ -881,7 +984,6 @@ create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.D
 
     return buffer;
 }
-
 
 vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
     
@@ -981,12 +1083,10 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
         assert(result == .SUCCESS);
     } 
     
-    //////////////////////////////////
     
     setup_debug_messenger(&debug_messenger, instance);
     
     
-    /////////////////////////
     // Surface creation
     
     if glfw.CreateWindowSurface(instance, window, nil, &surface) != .SUCCESS {
@@ -994,16 +1094,15 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
         assert(false);
     }
     
-    /////////////////////////////////
     create_sutable_device(vulkan_state);
     create_swapchain(vulkan_state, window);
+    create_depthbuffer(vulkan_state, {.DEPTH});
     create_render_pass(vulkan_state);
     create_graphics_pipeline(vulkan_state);
     create_framebuffers(vulkan_state);
     create_command_pool(vulkan_state);
     create_command_buffers(vulkan_state);
     create_sync_stuff(vulkan_state);
-    
     // triangle_mesh.vertices = make([dynamic]Vertex, 3);
     // triangle_mesh.vertices[0].pos = { 1,  1, 0}; 
     // triangle_mesh.vertices[1].pos = {-1,  1, 0}; 
@@ -1046,15 +1145,16 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State) {
         fmt.println("[Vulkan] Failed to begin recording command buffer!");
     }
     
-    clear_color_value : vk.ClearColorValue;
-    clear_color_value.float32[0] = 0.2;
-    clear_color_value.float32[1] = 0.2;
-    clear_color_value.float32[2] = 0.2;
-    clear_color_value.float32[3] = 1.0;
     
-    clear_value : vk.ClearValue;
-    clear_value.color = clear_color_value;
+    color_clear_value : vk.ClearValue;
+    color_clear_value.color.float32 = {
+        0.2, 0.2, 0.2, 1.0,
+    };
+
+    depth_clear_value : vk.ClearValue;
+    depth_clear_value.depthStencil.depth = 1.0;
     
+    clear_values : []vk.ClearValue = {color_clear_value, depth_clear_value};
     render_pass_info: vk.RenderPassBeginInfo = { 
         sType            = .RENDER_PASS_BEGIN_INFO,
         renderPass       = vulkan_state.render_pass,
@@ -1064,8 +1164,8 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State) {
             offset = {0, 0},
             extent = vulkan_state.window_extent,
         },
-        clearValueCount  = 1,
-        pClearValues     = &clear_value,
+        clearValueCount  = 2,
+        pClearValues     = &clear_values[0],
     };
     
     vk.CmdBeginRenderPass(cmd_buffer, &render_pass_info, .INLINE);
@@ -1166,7 +1266,6 @@ main :: proc() {
     window = glfw.CreateWindow(640, 480, "Vulkan", nil, nil);
     vulkan_init(vulkan_state, window);
     
-
     if window == nil {
         fmt.println("Failed to create glfw window.");
         glfw.Terminate();
