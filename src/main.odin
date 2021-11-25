@@ -1,6 +1,7 @@
 package main
 
 import        "core:fmt"
+import        "core:c"
 import        "vendor:glfw"
 import vk     "vendor:vulkan"
 import        "core:mem"
@@ -65,6 +66,8 @@ Vulkan_State :: struct {
     command_pool: vk.CommandPool,
     command_buffers: [dynamic]vk.CommandBuffer,
     
+    framebuffer_resized: bool,
+
     present_semaphore: vk.Semaphore,
     render_semaphore: vk.Semaphore,
     render_fence: vk.Fence,
@@ -109,13 +112,10 @@ debug_message_callback:: proc "system" (message_severity: vk.DebugUtilsMessageSe
 }
 
 populate_debug_messenger_create_info:: proc (create_info: ^vk.DebugUtilsMessengerCreateInfoEXT) {
-    using vk;
-    using DebugUtilsMessageTypeFlagEXT;
-    using DebugUtilsMessageSeverityFlagEXT;
     
     create_info.sType = .DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-    create_info.messageSeverity = {WARNING, ERROR};
-    create_info.messageType = {GENERAL, VALIDATION, PERFORMANCE};
+    create_info.messageSeverity = {.WARNING, .ERROR};
+    create_info.messageType = {.GENERAL, .VALIDATION, .PERFORMANCE};
     create_info.pfnUserCallback = debug_message_callback;
     create_info.pUserData = nil; // Optional
 }
@@ -588,8 +588,7 @@ create_sync_stuff:: proc(vulkan_state: ^Vulkan_State) {
     }
 }
 
-create_swapchain:: proc(vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
-    using vulkan_state;
+create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
     // Creating swap chain
     {
         swap_chain_support_info := get_swap_chain_support_info(gpu.physical_device, surface);
@@ -732,6 +731,36 @@ create_swapchain:: proc(vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) 
     }
 }
 
+recreate_swap_chain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
+    // Need to wait so that all the resources are not beign used before destroying/freeing.
+    vk.DeviceWaitIdle(gpu.device);
+
+    for framebuffer in swap_chain_framebuffers {
+        vk.DestroyFramebuffer(gpu.device, framebuffer, nil);
+    }
+
+    vk.FreeCommandBuffers(gpu.device, command_pool, u32(len(command_buffers)), &command_buffers[0]);
+
+    vk.DestroyPipeline(gpu.device, graphics_pipeline, nil);
+    vk.DestroyPipelineLayout(gpu.device, pipeline_layout, nil);
+    vk.DestroyRenderPass(gpu.device, render_pass, nil);
+
+    for image_view in swap_chain_image_views {
+        vk.DestroyImageView(gpu.device, image_view, nil);
+    }
+
+    vk.DestroySwapchainKHR(gpu.device, swap_chain, nil);
+
+    create_sutable_device(vulkan_state);
+    create_swapchain(vulkan_state, window);
+    create_depthbuffer(vulkan_state, {.DEPTH});
+    create_render_pass(vulkan_state);
+    create_graphics_pipeline(vulkan_state);
+    create_framebuffers(vulkan_state);
+    create_command_pool(vulkan_state);
+    create_command_buffers(vulkan_state);
+}
+
 create_image:: proc(using vulkan_state: ^Vulkan_State, frmat: vk.Format, width, height: u32, usage_flags: vk.ImageUsageFlags, memory_flags: vk.MemoryPropertyFlags) -> (image: Image) {
 
     image_info: vk.ImageCreateInfo = {
@@ -749,7 +778,7 @@ create_image:: proc(using vulkan_state: ^Vulkan_State, frmat: vk.Format, width, 
 
 
    if vk.CreateImage(gpu.device, &image_info, nil, &image.image) != .SUCCESS {
-        fmt.println("Failed to create image!");
+        fmt.println("[Vulkan] Failed to create image!");
     }
 
     mem_requirements: vk.MemoryRequirements;
@@ -787,7 +816,7 @@ create_depthbuffer:: proc(using vulkan_state: ^Vulkan_State, aspect_flags: vk.Im
     };
 
     if vk.CreateImageView(gpu.device, &image_view_info, nil, &depth_image_view) != .SUCCESS {
-        fmt.println("Failed to create image view!");
+        fmt.println("[Vulkan] Failed to create image view!");
     }
 
 }
@@ -1124,13 +1153,17 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
     index_buffer = create_buffer(vulkan_state, &some_mesh.indices[0], size, .INDEX_BUFFER);
 }
 
-draw_frame:: proc(using vulkan_state: ^Vulkan_State) {
+draw_frame:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
     
     vk.WaitForFences(gpu.device, 1, &render_fence, true, misc.U64_MAX);
     vk.ResetFences(gpu.device, 1, &render_fence);
     
     image_index: u32;
-    vk.AcquireNextImageKHR(gpu.device, swap_chain, misc.U64_MAX, present_semaphore, 0, &image_index);  
+    image_result := vk.AcquireNextImageKHR(gpu.device, swap_chain, misc.U64_MAX, present_semaphore, 0, &image_index);  
+
+    if framebuffer_resized {
+        recreate_swap_chain(vulkan_state, window)
+    }
     
     cmd_buffer := command_buffers[image_index];
     vk.ResetCommandBuffer(cmd_buffer, {.RELEASE_RESOURCES});
@@ -1185,7 +1218,6 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State) {
     model := la.matrix4_rotate(math.to_radians_f32(20.0), vec3{0, 1, 0});
     mesh_matrix := la.matrix_mul(la.matrix_mul(projection, view), model);
 
-    // mesh_matrix = la.MATRIX4F32_IDENTITY;
 
     push_constants: Push_Constants;
     push_constants.render_matrix = mesh_matrix;
@@ -1236,14 +1268,18 @@ megabytes:: proc(n: int) -> int {
     return n * 1024 * 1024;
 }
 
+glfw_framebuffer_size_callback:: proc "c" (window: glfw.WindowHandle, width, height: c.int) {
+
+    vulkan_state : = cast(^Vulkan_State)glfw.GetWindowUserPointer(window);
+    vulkan_state.framebuffer_resized = true;
+}
+
 main :: proc() {
     
     main_arena: mem.Arena;
     temp_arena: mem.Arena;
-    
     memory, err := mem.alloc_bytes(megabytes(12));
     mem.init_arena(&main_arena, memory);
-    
     memory, err  = mem.alloc_bytes(megabytes(32));
     mem.init_arena(&temp_arena, memory);
     
@@ -1252,7 +1288,7 @@ main :: proc() {
     
     temp_memory: mem.Arena_Temp_Memory = mem.begin_arena_temp_memory(&temp_arena);
     
-    vulkan_state := new(Vulkan_State);
+    vulkan_state : ^Vulkan_State = new(Vulkan_State);
     window: glfw.WindowHandle;
     
     mem.end_arena_temp_memory(temp_memory);
@@ -1262,8 +1298,12 @@ main :: proc() {
     }
 
     glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API);
-    glfw.WindowHint(glfw.RESIZABLE, 0);
+    //glfw.WindowHint(glfw.RESIZABLE, 0);
+
     window = glfw.CreateWindow(640, 480, "Vulkan", nil, nil);
+    glfw.SetFramebufferSizeCallback(window, glfw_framebuffer_size_callback);
+    glfw.SetWindowUserPointer(window, vulkan_state);
+
     vulkan_init(vulkan_state, window);
     
     if window == nil {
@@ -1278,7 +1318,8 @@ main :: proc() {
     
     for ;!glfw.WindowShouldClose(window); {
         glfw.PollEvents();
-        draw_frame(vulkan_state);
+        draw_frame(vulkan_state, window);
     }
+
     glfw.Terminate();
 }
