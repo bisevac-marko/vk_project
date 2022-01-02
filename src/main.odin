@@ -28,6 +28,7 @@ GPU_Device :: struct {
 Buffer :: struct {
     memory: vk.DeviceMemory,
     buffer: vk.Buffer,
+
 }
 
 Image :: struct {
@@ -49,11 +50,11 @@ Vulkan_State :: struct {
     
     surface: vk.SurfaceKHR,
     
-    swap_chain: vk.SwapchainKHR,
-    swap_chain_images: [dynamic]vk.Image,
+    swapchain: vk.SwapchainKHR,
     window_extent: vk.Extent2D, 
-    swap_chain_format: vk.Format,
-    swap_chain_image_views: [dynamic]vk.ImageView,
+    swapchain_format: vk.Format,
+    swapchain_images: [dynamic]vk.Image,
+    swapchain_image_views: [dynamic]vk.ImageView,
     
     vertex_module: vk.ShaderModule, 
     fragment_module: vk.ShaderModule, 
@@ -62,8 +63,8 @@ Vulkan_State :: struct {
     render_pass: vk.RenderPass,
     graphics_pipeline: vk.Pipeline,
     
-    swap_chain_framebuffers: [dynamic]vk.Framebuffer,
     command_pool: vk.CommandPool,
+    swapchain_framebuffers: [dynamic]vk.Framebuffer,
     command_buffers: [dynamic]vk.CommandBuffer,
     
     framebuffer_resized: bool,
@@ -192,7 +193,7 @@ check_device_extensions:: proc(device: vk.PhysicalDevice) -> b32{
     return result;
 }
 
-get_swap_chain_support_info:: proc(device: vk.PhysicalDevice, surface: vk.SurfaceKHR) -> Swap_Chain_Support_Info {
+get_swapchain_support_info:: proc(device: vk.PhysicalDevice, surface: vk.SurfaceKHR) -> Swap_Chain_Support_Info {
     result: Swap_Chain_Support_Info;
     format_count: u32;
     present_mode_count: u32;
@@ -240,7 +241,7 @@ create_shader_module:: proc(device: vk.Device, shader_code: []byte) -> vk.Shader
 create_render_pass:: proc(vulkan_state: ^Vulkan_State) {
     
     color_attachment: vk.AttachmentDescription = {
-        format  = vulkan_state.swap_chain_format,
+        format  = vulkan_state.swapchain_format,
         samples = {._1},
         loadOp =  .CLEAR,
         storeOp = .STORE,
@@ -497,13 +498,13 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
 
 create_framebuffers:: proc(using vulkan_state: ^Vulkan_State) {
     
-    count:= len(swap_chain_images);
-    swap_chain_framebuffers = make([dynamic]vk.Framebuffer, count, count);
+    count:= len(swapchain_images);
+    swapchain_framebuffers = make([dynamic]vk.Framebuffer, count, count);
     
     for  i := 0; i < count; i += 1 {
         
         attachments: []vk.ImageView = {
-            swap_chain_image_views[i],
+            swapchain_image_views[i],
             depth_image_view,
         };
         
@@ -517,23 +518,21 @@ create_framebuffers:: proc(using vulkan_state: ^Vulkan_State) {
             layers          = 1,
         };
         
-        if vk.CreateFramebuffer(gpu.device, &framebuffer_info, nil, &swap_chain_framebuffers[i]) != .SUCCESS {
+        if vk.CreateFramebuffer(gpu.device, &framebuffer_info, nil, &swapchain_framebuffers[i]) != .SUCCESS {
             fmt.println("[Vulkan] Failed to create framebuffer!");
         }
     }
 }
 
-create_command_pool:: proc(vulkan_state: ^Vulkan_State) {
+create_command_pool:: proc(using vulkan_state: ^Vulkan_State) {
     
-    queue_family_indices := find_queue_families(vulkan_state.gpu.physical_device, vulkan_state.surface);
+    queue_family_indices := find_queue_families(gpu.physical_device, surface);
     
     pool_info: vk.CommandPoolCreateInfo = {
         sType = .COMMAND_POOL_CREATE_INFO,
         queueFamilyIndex = queue_family_indices.graphics_family.index,
         flags = {.RESET_COMMAND_BUFFER}, // Optional
     };
-    
-    using vulkan_state;
     
     if vk.CreateCommandPool(gpu.device, &pool_info, nil, &command_pool) != .SUCCESS {
         fmt.println("[Vulkan] Failed to create command pool!");
@@ -542,7 +541,7 @@ create_command_pool:: proc(vulkan_state: ^Vulkan_State) {
 
 create_command_buffers:: proc(vulkan_state: ^Vulkan_State) {
     
-    framebuffer_count := len(vulkan_state.swap_chain_framebuffers);
+    framebuffer_count := len(vulkan_state.swapchain_framebuffers);
     vulkan_state.command_buffers = make([dynamic]vk.CommandBuffer, framebuffer_count, framebuffer_count);
     
     alloc_info: vk.CommandBufferAllocateInfo = {
@@ -558,7 +557,7 @@ create_command_buffers:: proc(vulkan_state: ^Vulkan_State) {
     
 }
 
-create_sync_stuff:: proc(vulkan_state: ^Vulkan_State) {
+create_sync_stuff:: proc(using vulkan_state: ^Vulkan_State) {
     
     semaphore_create_info: vk.SemaphoreCreateInfo = {
         sType = .SEMAPHORE_CREATE_INFO,
@@ -568,12 +567,6 @@ create_sync_stuff:: proc(vulkan_state: ^Vulkan_State) {
         sType = .FENCE_CREATE_INFO,
         flags = {.SIGNALED},
     };
-    using vulkan_state;
-    /*
-    image_available_semaphore = make([dynamic]vk.Semaphore, ,0 MAX_FRAMES_IN_FLIGHT);
-    render_finished_semaphore = make([dynamic]vk.Semaphore, ,0 MAX_FRAMES_IN_FLIGHT);
-    fences                    = make([dynamic]vk.Fence, ,0 MAX_FRAMES_IN_FLIGHT);
-*/
     
     if (vk.CreateSemaphore(gpu.device, &semaphore_create_info, nil, &render_semaphore) != .SUCCESS ||
         vk.CreateSemaphore(gpu.device, &semaphore_create_info, nil, &present_semaphore) != .SUCCESS) {
@@ -591,10 +584,10 @@ create_sync_stuff:: proc(vulkan_state: ^Vulkan_State) {
 create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
     // Creating swap chain
     {
-        swap_chain_support_info := get_swap_chain_support_info(gpu.physical_device, surface);
+        swapchain_support_info := get_swapchain_support_info(gpu.physical_device, surface);
         
-        if (swap_chain_support_info.formats == nil ||
-            swap_chain_support_info.present_modes == nil) {
+        if (swapchain_support_info.formats == nil ||
+            swapchain_support_info.present_modes == nil) {
             // Unsupported swapchain
             vk.DestroyDevice(gpu.device, nil);
             assert(false);
@@ -603,10 +596,10 @@ create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHa
         // Choose swap surface format
         chosen_format: vk.SurfaceFormatKHR;
         
-        for fmt, index in swap_chain_support_info.formats {
+        for fmt, index in swapchain_support_info.formats {
             if (fmt.format == .B8G8R8A8_SRGB &&
                 fmt.colorSpace == .COLORSPACE_SRGB_NONLINEAR) {
-                chosen_format = swap_chain_support_info.formats[index];
+                chosen_format = swapchain_support_info.formats[index];
                 break;
             }
         }
@@ -614,7 +607,7 @@ create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHa
         // Choose swap presentation mode
         chosen_present_mode: vk.PresentModeKHR = .FIFO;
         
-        for mode, index in swap_chain_support_info.present_modes {
+        for mode, index in swapchain_support_info.present_modes {
             if mode == .MAILBOX { 
                 chosen_present_mode = .MAILBOX;
                 break;
@@ -625,7 +618,7 @@ create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHa
         extent: vk.Extent2D;
         image_count: u32;
         {
-            using swap_chain_support_info;
+            using swapchain_support_info;
             extent = capabilities.currentExtent;
             
             if extent.width != misc.U32_MAX {
@@ -658,7 +651,7 @@ create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHa
             imageExtent = extent,
             imageArrayLayers = 1,
             imageUsage = {.COLOR_ATTACHMENT},
-            preTransform = swap_chain_support_info.capabilities.currentTransform,
+            preTransform = swapchain_support_info.capabilities.currentTransform,
             compositeAlpha = {.OPAQUE},
             presentMode = chosen_present_mode,
             clipped = true,
@@ -667,7 +660,7 @@ create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHa
         
         // vulkan_state fields
         window_extent = extent; 
-        swap_chain_format = chosen_format.format;
+        swapchain_format = chosen_format.format;
         
         queue_family_indices := find_queue_families(gpu.physical_device, surface);
         
@@ -690,25 +683,25 @@ create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHa
             create_info.pQueueFamilyIndices = nil; // Optional
         }
         
-        if vk.CreateSwapchainKHR(gpu.device, &create_info, nil, &swap_chain) != .SUCCESS {
+        if vk.CreateSwapchainKHR(gpu.device, &create_info, nil, &swapchain) != .SUCCESS {
             fmt.println("[Vulkan] Failed to create swap chain.");
             assert(false);
         }
         
         the_image_count: u32;
-        vk.GetSwapchainImagesKHR(gpu.device, swap_chain, &the_image_count, nil);
-        swap_chain_images = make([dynamic]vk.Image, the_image_count, the_image_count);
-        vk.GetSwapchainImagesKHR(gpu.device, swap_chain, &image_count, &swap_chain_images[0]);
+        vk.GetSwapchainImagesKHR(gpu.device, swapchain, &the_image_count, nil);
+        swapchain_images = make([dynamic]vk.Image, the_image_count, the_image_count);
+        vk.GetSwapchainImagesKHR(gpu.device, swapchain, &image_count, &swapchain_images[0]);
     }
     // Creating image views
     {
-        vulkan_state.swap_chain_image_views = make([dynamic]vk.ImageView, len(swap_chain_images), len(swap_chain_images));
-        for image_idx := 0; image_idx < len(swap_chain_images); image_idx += 1 {
+        vulkan_state.swapchain_image_views = make([dynamic]vk.ImageView, len(swapchain_images), len(swapchain_images));
+        for image_idx := 0; image_idx < len(swapchain_images); image_idx += 1 {
             create_info := vk.ImageViewCreateInfo {
                 sType                 = .IMAGE_VIEW_CREATE_INFO,
-                image                 = swap_chain_images[image_idx], 
+                image                 = swapchain_images[image_idx], 
                 viewType              = .D2,
-                format                = swap_chain_format,
+                format                = swapchain_format,
                 components            = {
                     r = .IDENTITY, 
                     g = .IDENTITY, 
@@ -724,18 +717,19 @@ create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHa
                 },
             }
             
-            if vk.CreateImageView(gpu.device, &create_info, nil, &swap_chain_image_views[image_idx]) != .SUCCESS {
+            if vk.CreateImageView(gpu.device, &create_info, nil, &swapchain_image_views[image_idx]) != .SUCCESS {
                 fmt.println("[Vulkan] Failed to create image views!");
             }
         }
     }
 }
 
-recreate_swap_chain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
+recreate_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
     // Need to wait so that all the resources are not beign used before destroying/freeing.
     vk.DeviceWaitIdle(gpu.device);
 
-    for framebuffer in swap_chain_framebuffers {
+    // Free everything
+    for framebuffer in swapchain_framebuffers {
         vk.DestroyFramebuffer(gpu.device, framebuffer, nil);
     }
 
@@ -745,13 +739,21 @@ recreate_swap_chain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.Windo
     vk.DestroyPipelineLayout(gpu.device, pipeline_layout, nil);
     vk.DestroyRenderPass(gpu.device, render_pass, nil);
 
-    for image_view in swap_chain_image_views {
+    for image_view in swapchain_image_views {
         vk.DestroyImageView(gpu.device, image_view, nil);
     }
 
-    vk.DestroySwapchainKHR(gpu.device, swap_chain, nil);
+    vk.DestroySwapchainKHR(gpu.device, swapchain, nil);
 
-    create_sutable_device(vulkan_state);
+    vk.DestroyFence(gpu.device, render_fence, nil);
+    vk.DestroySemaphore(gpu.device, render_semaphore, nil);
+    vk.DestroySemaphore(gpu.device, present_semaphore, nil);
+
+    delete(swapchain_images);
+    delete(swapchain_image_views);
+    delete(swapchain_framebuffers);
+    delete(command_buffers);
+
     create_swapchain(vulkan_state, window);
     create_depthbuffer(vulkan_state, {.DEPTH});
     create_render_pass(vulkan_state);
@@ -759,6 +761,7 @@ recreate_swap_chain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.Windo
     create_framebuffers(vulkan_state);
     create_command_pool(vulkan_state);
     create_command_buffers(vulkan_state);
+    create_sync_stuff(vulkan_state);
 }
 
 create_image:: proc(using vulkan_state: ^Vulkan_State, frmat: vk.Format, width, height: u32, usage_flags: vk.ImageUsageFlags, memory_flags: vk.MemoryPropertyFlags) -> (image: Image) {
@@ -853,13 +856,12 @@ get_vertex_description:: proc() -> Vertex_Description {
 	return description;
 }
 
-create_sutable_device:: proc(vulkan_state: ^Vulkan_State) {
-    using vulkan_state;
+create_sutable_device:: proc(using vulkan_state: ^Vulkan_State) {
     
     device_count: u32;
     vk.EnumeratePhysicalDevices(instance, &device_count, nil);
     
-    if device_count == 0
+    if (device_count == 0)
     {
         fmt.println("[Vulkan] No GPU with Vulkan support!");
         assert(false);
@@ -872,7 +874,7 @@ create_sutable_device:: proc(vulkan_state: ^Vulkan_State) {
     vk.EnumeratePhysicalDevices(instance, &device_count, &devices[0]);
     
     // Check devices if they are sutable
-    for i: u32 = 0; i < device_count; i += 1 {
+    for i :u32= 0; i < device_count; i += 1 {
         // Device stability checks
         gpu.physical_device = devices[i];
         
@@ -937,8 +939,6 @@ create_sutable_device:: proc(vulkan_state: ^Vulkan_State) {
         vk.GetDeviceQueue(gpu.device, queue_family_indices.graphics_family.index, 0, &graphics_queue);
         vk.GetDeviceQueue(gpu.device, queue_family_indices.present_family.index, 0, &present_queue);
         
-        // TODO(mb): Right now we just quit the loop of first compatible physical device 
-        // instead of selecting the best device for the job.
         break;
     }
 }
@@ -987,29 +987,101 @@ allocate_gpu_memory:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequirem
 
 create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.DeviceSize, usage: vk.BufferUsageFlag) -> (buffer: Buffer) {
     
-    buffer_info: vk.BufferCreateInfo = {
+    buffer_info: vk.BufferCreateInfo;
+    mem_requirements: vk.MemoryRequirements;
+    staging_buffer: vk.Buffer;
+    staging_memory: vk.DeviceMemory;
+
+    // Staging buffer info
+    buffer_info = {
         sType       = .BUFFER_CREATE_INFO,
         size        = size,
-        usage       = {usage},
+        usage       = {.TRANSFER_SRC},
+        sharingMode = .EXCLUSIVE,
     };
 
+    // Create staging buffer
+    if vk.CreateBuffer(gpu.device, &buffer_info, nil, &staging_buffer) != .SUCCESS {
+        fmt.println("[Vulkan] Failed to create buffer!");
+    }
+    
+    vk.GetBufferMemoryRequirements(gpu.device, staging_buffer, &mem_requirements);
+    
+    staging_memory = allocate_gpu_memory(&gpu, mem_requirements, {.HOST_VISIBLE, .HOST_COHERENT});
+    
+    vk.BindBufferMemory(gpu.device, staging_buffer, staging_memory, 0);
+    
+    gpu_data: rawptr;
+    vk.MapMemory(gpu.device, staging_memory, 0, buffer_info.size, {}, &gpu_data);
+    
+    mem.copy(gpu_data, data, int(buffer_info.size));
+    
+    vk.UnmapMemory(gpu.device, staging_memory);
+
+    // ------------------------------------------
+
+    // Main buffer info
+    buffer_info = {
+        sType       = .BUFFER_CREATE_INFO,
+        size        = size,
+        usage       = {usage, .TRANSFER_DST},
+        sharingMode = .EXCLUSIVE,
+    };
+
+    // Create main buffer
     if vk.CreateBuffer(gpu.device, &buffer_info, nil, &buffer.buffer) != .SUCCESS {
         fmt.println("[Vulkan] Failed to create buffer!");
     }
     
-    mem_requirements: vk.MemoryRequirements;
     vk.GetBufferMemoryRequirements(gpu.device, buffer.buffer, &mem_requirements);
     
-    buffer.memory = allocate_gpu_memory(&gpu, mem_requirements, {.HOST_VISIBLE, .HOST_COHERENT});
-    
+    // Allocate gpu local memory
+    buffer.memory = allocate_gpu_memory(&gpu, mem_requirements, {.DEVICE_LOCAL});
+
     vk.BindBufferMemory(gpu.device, buffer.buffer, buffer.memory, 0);
-    
-    gpu_data: rawptr;
-    vk.MapMemory(gpu.device, buffer.memory, 0, buffer_info.size, {}, &gpu_data);
-    
-    mem.copy(gpu_data, data, int(buffer_info.size));
-    
-    vk.UnmapMemory(gpu.device, buffer.memory);
+
+    // Copy staging buffer to main gpu buffer
+
+    alloc_info: vk.CommandBufferAllocateInfo = {
+        sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
+        level              = .PRIMARY,
+        commandPool        = command_pool,
+        commandBufferCount = 1,
+    };
+
+    temp_cmd_buffer: vk.CommandBuffer;
+    vk.AllocateCommandBuffers(gpu.device, &alloc_info, &temp_cmd_buffer);
+
+    begin_info: vk.CommandBufferBeginInfo = {
+        sType = .COMMAND_BUFFER_BEGIN_INFO,
+        flags = {.ONE_TIME_SUBMIT},
+    };
+
+    vk.BeginCommandBuffer(temp_cmd_buffer, &begin_info);
+
+    copy_region: vk.BufferCopy = {
+        srcOffset = 0,
+        dstOffset = 0,
+        size      = size,
+    }
+
+    vk.CmdCopyBuffer(temp_cmd_buffer, staging_buffer, buffer.buffer, 1, &copy_region);
+
+    vk.EndCommandBuffer(temp_cmd_buffer);
+
+    submit_info: vk.SubmitInfo = {
+        sType              = .SUBMIT_INFO,
+        commandBufferCount = 1,
+        pCommandBuffers    = &temp_cmd_buffer,
+    };
+
+    vk.QueueSubmit(graphics_queue, 1, &submit_info, 0);
+    vk.QueueWaitIdle(graphics_queue);
+
+    vk.FreeCommandBuffers(gpu.device, command_pool, 1, &temp_cmd_buffer);
+
+    vk.DestroyBuffer(gpu.device, staging_buffer, nil);
+    vk.FreeMemory(gpu.device, staging_memory, nil);
 
     return buffer;
 }
@@ -1071,7 +1143,7 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
         vk.EnumerateInstanceLayerProperties(&layer_count, &available_layers[0]);
         
         when ODIN_DEBUG {
-            validation_layers := [?]cstring{
+            validation_layers := []cstring{
                 "VK_LAYER_KHRONOS_validation",
             };
             
@@ -1084,12 +1156,11 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
                     if mem.compare_byte_ptrs(&available_layers[j].layerName[0], transmute(^byte)validation_layers[i], length) == 0{
                         layer_found = true;
                     }
-                    
                 }
             }
             assert(layer_found);
         } else {
-            validation_layers := nil;
+            validation_layers :[]cstring= {};
         }
         
         create_info: vk.InstanceCreateInfo = {
@@ -1155,15 +1226,18 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
 
 draw_frame:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
     
+    if (framebuffer_resized) {
+        recreate_swapchain(vulkan_state, window)
+        framebuffer_resized = false;
+        return;
+    }
+
     vk.WaitForFences(gpu.device, 1, &render_fence, true, misc.U64_MAX);
     vk.ResetFences(gpu.device, 1, &render_fence);
     
     image_index: u32;
-    image_result := vk.AcquireNextImageKHR(gpu.device, swap_chain, misc.U64_MAX, present_semaphore, 0, &image_index);  
+    image_result := vk.AcquireNextImageKHR(gpu.device, swapchain, misc.U64_MAX, present_semaphore, 0, &image_index);  
 
-    if framebuffer_resized {
-        recreate_swap_chain(vulkan_state, window)
-    }
     
     cmd_buffer := command_buffers[image_index];
     vk.ResetCommandBuffer(cmd_buffer, {.RELEASE_RESOURCES});
@@ -1191,7 +1265,7 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) 
     render_pass_info: vk.RenderPassBeginInfo = { 
         sType            = .RENDER_PASS_BEGIN_INFO,
         renderPass       = vulkan_state.render_pass,
-        framebuffer      = vulkan_state.swap_chain_framebuffers[image_index],
+        framebuffer      = vulkan_state.swapchain_framebuffers[image_index],
         
         renderArea       = {
             offset = {0, 0},
@@ -1255,7 +1329,7 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) 
         sType              = .PRESENT_INFO_KHR,
         pWaitSemaphores    = &render_semaphore,
         waitSemaphoreCount = 1,
-        pSwapchains        = &swap_chain,
+        pSwapchains        = &swapchain,
         swapchainCount     = 1,
         pImageIndices      = &image_index,
         pResults           = nil,
@@ -1276,47 +1350,33 @@ glfw_framebuffer_size_callback:: proc "c" (window: glfw.WindowHandle, width, hei
 
 main :: proc() {
     
-    main_arena: mem.Arena;
-    temp_arena: mem.Arena;
-    memory, err := mem.alloc_bytes(megabytes(12));
-    mem.init_arena(&main_arena, memory);
-    memory, err  = mem.alloc_bytes(megabytes(32));
-    mem.init_arena(&temp_arena, memory);
-    
-    context.allocator = mem.arena_allocator(&main_arena);
-    context.temp_allocator = mem.arena_allocator(&temp_arena);
-    
-    temp_memory: mem.Arena_Temp_Memory = mem.begin_arena_temp_memory(&temp_arena);
-    
     vulkan_state : ^Vulkan_State = new(Vulkan_State);
     window: glfw.WindowHandle;
     
-    mem.end_arena_temp_memory(temp_memory);
-    
-    if glfw.Init() == 0 {
+    if (glfw.Init() == 0) {
         fmt.println("Failed to init glfw.");
     }
 
     glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API);
     //glfw.WindowHint(glfw.RESIZABLE, 0);
 
-    window = glfw.CreateWindow(640, 480, "Vulkan", nil, nil);
+    window = glfw.CreateWindow(1366, 768, "Vulkan", nil, nil);
     glfw.SetFramebufferSizeCallback(window, glfw_framebuffer_size_callback);
     glfw.SetWindowUserPointer(window, vulkan_state);
 
     vulkan_init(vulkan_state, window);
     
-    if window == nil {
+    if (window == nil) {
         fmt.println("Failed to create glfw window.");
         glfw.Terminate();
     }
     
-    if glfw.VulkanSupported() == false {
+    if (glfw.VulkanSupported() == false) {
         fmt.println("Vulkan is unsuported.");
         glfw.Terminate();
     }
     
-    for ;!glfw.WindowShouldClose(window); {
+    for (!glfw.WindowShouldClose(window)) {
         glfw.PollEvents();
         draw_frame(vulkan_state, window);
     }
