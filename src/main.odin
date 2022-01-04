@@ -20,9 +20,16 @@ Vertex_Description :: struct {
     flags: vk.PipelineVertexInputStateCreateFlags,
 }
 
-GPU_Device :: struct {
+GPU_Properties :: struct {
+    name: string,
+    heap_count: int,
+    heap_sizes: [vk.MAX_MEMORY_HEAPS]u64,
+}
+
+GPU :: struct {
     device: vk.Device,
     physical_device: vk.PhysicalDevice,
+    properties: GPU_Properties,
 }
 
 Buffer :: struct {
@@ -31,16 +38,31 @@ Buffer :: struct {
 
 }
 
+
 Image :: struct {
     memory: vk.DeviceMemory,
     image: vk.Image,
 }
 
-Vulkan_State :: struct {
+PipelineBuildInfo :: struct {
+    vertex_shader   : string,
+    fragment_shader : string,
+}
+
+Pipeline :: struct {
+    vertex_module: vk.ShaderModule, 
+    fragment_module: vk.ShaderModule, 
     
+    pipeline_layout: vk.PipelineLayout,
+    render_pass: vk.RenderPass,
+    graphics_pipeline: vk.Pipeline,
+}
+
+Vulkan_Context :: struct {
+
     instance: vk.Instance,
     
-    gpu: GPU_Device,
+    gpu: GPU,
     
     graphics_queue: vk.Queue,
     present_queue: vk.Queue,
@@ -56,14 +78,11 @@ Vulkan_State :: struct {
     swapchain_images: [dynamic]vk.Image,
     swapchain_image_views: [dynamic]vk.ImageView,
     
-    vertex_module: vk.ShaderModule, 
-    fragment_module: vk.ShaderModule, 
-    
-    pipeline_layout: vk.PipelineLayout,
-    render_pass: vk.RenderPass,
-    graphics_pipeline: vk.Pipeline,
+    pipeline   : Pipeline,
+    pipeline2D : Pipeline,
     
     command_pool: vk.CommandPool,
+    upload_command_pool: vk.CommandPool,
     swapchain_framebuffers: [dynamic]vk.Framebuffer,
     command_buffers: [dynamic]vk.CommandBuffer,
     
@@ -79,7 +98,12 @@ Vulkan_State :: struct {
     depth_image_view: vk.ImageView,
     depth_format: vk.Format,
     
-    triangle_mesh: Mesh,
+    vertices: [4096]Vertex2D,
+    vertex_count: int,
+
+    indices: [4096]u32,
+    index_count: int,
+
     some_mesh: Mesh,
 }
 
@@ -121,7 +145,7 @@ populate_debug_messenger_create_info:: proc (create_info: ^vk.DebugUtilsMessenge
     create_info.pUserData = nil; // Optional
 }
 
-setup_debug_messenger:: proc(debug_messenger: ^vk.DebugUtilsMessengerEXT, instance: vk.Instance) {
+create_debug_messenger:: proc(debug_messenger: ^vk.DebugUtilsMessengerEXT, instance: vk.Instance) {
     create_info: vk.DebugUtilsMessengerCreateInfoEXT;
     populate_debug_messenger_create_info(&create_info);
     
@@ -132,6 +156,22 @@ setup_debug_messenger:: proc(debug_messenger: ^vk.DebugUtilsMessengerEXT, instan
     
     result := vk.CreateDebugUtilsMessengerEXT(instance, &create_info, nil, debug_messenger);
     assert(result == .SUCCESS);
+}
+
+destroy_debug_messenger:: proc(debug_messenger: vk.DebugUtilsMessengerEXT, instance: vk.Instance) {
+    vk.DestroyDebugUtilsMessengerEXT(instance, debug_messenger, nil);
+}
+
+to_megabytes:: proc(bytes: u64) -> u64 {
+    return bytes / 1024 / 1024;
+}
+
+print_gpu_info:: proc(gpu: ^GPU) {
+
+    fmt.println("[Vulkan] Graphics Card: ", gpu.properties.name)
+    for i := 0; i < gpu.properties.heap_count; i += 1 {
+        fmt.println("[Vulkan] Memory Heap Size:  MB", to_megabytes(gpu.properties.heap_sizes[i]));
+    }
 }
 
 find_queue_families:: proc(device: vk.PhysicalDevice, surface: vk.SurfaceKHR) -> Queue_Family_Indicies {
@@ -238,10 +278,10 @@ create_shader_module:: proc(device: vk.Device, shader_code: []byte) -> vk.Shader
     return shader_module;
 }
 
-create_render_pass:: proc(vulkan_state: ^Vulkan_State) {
+create_render_pass:: proc(using vk_ctx: ^Vulkan_Context) -> (pass: vk.RenderPass) {
     
     color_attachment: vk.AttachmentDescription = {
-        format  = vulkan_state.swapchain_format,
+        format  = swapchain_format,
         samples = {._1},
         loadOp =  .CLEAR,
         storeOp = .STORE,
@@ -267,7 +307,7 @@ create_render_pass:: proc(vulkan_state: ^Vulkan_State) {
     
 
     depth_attachment: vk.AttachmentDescription = {
-        format = vulkan_state.depth_format,
+        format = depth_format,
         samples = {._1},
         loadOp = .CLEAR,
         storeOp = .STORE,
@@ -281,7 +321,6 @@ create_render_pass:: proc(vulkan_state: ^Vulkan_State) {
         attachment = 1,
         layout = .DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
     }
-
 
     subpass: vk.SubpassDescription = {
         pipelineBindPoint = .GRAPHICS,
@@ -302,28 +341,30 @@ create_render_pass:: proc(vulkan_state: ^Vulkan_State) {
         pDependencies = &dependency,
     };
     
-    if vk.CreateRenderPass(vulkan_state.gpu.device, &render_pass_info, nil, &vulkan_state.render_pass) != .SUCCESS {
+    if vk.CreateRenderPass(gpu.device, &render_pass_info, nil, &pass) != .SUCCESS {
         fmt.println("[Vulkan] Failed to create render pass!");
     }
+
+    return pass;
 }
 
-create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
+create_graphics_pipeline:: proc(using vk_ctx: ^Vulkan_Context, build_info: PipelineBuildInfo, $VertexType: typeid) -> (result: Pipeline) {
     // Vertex shader
     {
-        vert_code, success := os.read_entire_file("vert.spv");
+        vert_code, success := os.read_entire_file(build_info.vertex_shader);
         
         if success {
-            vulkan_state.vertex_module = create_shader_module(vulkan_state.gpu.device, vert_code);
+            result.vertex_module = create_shader_module(gpu.device, vert_code);
         } else {
             fmt.println("[Vulkan] Failed to read shader file!");
         }
     }
     // Fragment shader
     {
-        frag_code, success := os.read_entire_file("frag.spv");
+        frag_code, success := os.read_entire_file(build_info.fragment_shader);
         
         if success {
-            vulkan_state.fragment_module = create_shader_module(vulkan_state.gpu.device, frag_code);
+            result.fragment_module = create_shader_module(gpu.device, frag_code);
         } else {
             fmt.println("[Vulkan] Failed to read shader file!");
         }
@@ -332,7 +373,7 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
     vert_create_info: vk.PipelineShaderStageCreateInfo = {
         sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
         stage = {.VERTEX},
-        module = vulkan_state.vertex_module,
+        module = result.vertex_module,
         pName = "main", // Entry point
         pSpecializationInfo = nil, // This field allow to specify values for shader constants
     };
@@ -340,12 +381,12 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
     frag_create_info: vk.PipelineShaderStageCreateInfo = {
         sType = .PIPELINE_SHADER_STAGE_CREATE_INFO,
         stage = {.FRAGMENT},
-        module = vulkan_state.fragment_module,
+        module = result.fragment_module,
         pName = "main", // Entry point
         pSpecializationInfo = nil, // This field allow to specify values for shader constants
     };
     
-    vertex_desc := get_vertex_description();
+    vertex_desc := get_vertex_description(VertexType);
     
     vertex_input_state_create_info: vk.PipelineVertexInputStateCreateInfo = {
         sType                           = .PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -364,17 +405,16 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
     viewport: vk.Viewport = {
         x = 0.0,
         y = 0.0,
-        width  = f32(vulkan_state.window_extent.width),
-        height = f32(vulkan_state.window_extent.height),
+        width  = f32(window_extent.width),
+        height = f32(window_extent.height),
         minDepth = 0.0,
         maxDepth = 1.0,
     };
     
     scissor: vk.Rect2D = {
         offset = {0, 0},
-        extent = vulkan_state.window_extent,
+        extent = window_extent,
     };
-    
     
     // It is possible to use multiple viewports and scissor rectangles on some graphics cards, 
     // so its members reference an array of them. Using multiple requires enabling
@@ -448,15 +488,15 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
     };
     
     
-    if vk.CreatePipelineLayout(vulkan_state.gpu.device, &pipeline_layout_create_info, nil, &vulkan_state.pipeline_layout) != .SUCCESS {
+    if vk.CreatePipelineLayout(gpu.device, &pipeline_layout_create_info, nil, &result.pipeline_layout) != .SUCCESS {
         
         fmt.println("[Vulkan] Failed to create pipeline layout!");
     }
     
-    shader_stages := []vk.PipelineShaderStageCreateInfo {frag_create_info, vert_create_info};
+    shader_stages := []vk.PipelineShaderStageCreateInfo{frag_create_info, vert_create_info};
 
     // Depth testing
-    depth_stencil_info: vk.PipelineDepthStencilStateCreateInfo = {
+    depth_stencil_info := vk.PipelineDepthStencilStateCreateInfo {
         sType = .PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         depthTestEnable = true,
         depthWriteEnable = true,
@@ -467,8 +507,10 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
         stencilTestEnable = false,
     }
     
+    // NOTE: render pass creation
+    result.render_pass = create_render_pass(vk_ctx);
     
-    pipeline_create_info: vk.GraphicsPipelineCreateInfo = {
+    pipeline_create_info := vk.GraphicsPipelineCreateInfo {
         sType                  = .GRAPHICS_PIPELINE_CREATE_INFO,
         stageCount             = 2,
         pStages                = &shader_stages[0],
@@ -481,22 +523,24 @@ create_graphics_pipeline:: proc(vulkan_state: ^Vulkan_State) {
         pColorBlendState       = &color_blend_state_create_info,
         pDynamicState          = nil, // Optional
         
-        layout                 = vulkan_state.pipeline_layout,
+        layout                 = result.pipeline_layout,
         
-        renderPass             = vulkan_state.render_pass,
+        renderPass             = result.render_pass,
         subpass                = 0,
         
         basePipelineHandle     = 0, // Optional
         basePipelineIndex      = -1, // Optional
     };
     
-    if vk.CreateGraphicsPipelines(vulkan_state.gpu.device, 0, 1, &pipeline_create_info, nil, &vulkan_state.graphics_pipeline) != .SUCCESS {
+    if vk.CreateGraphicsPipelines(gpu.device, 0, 1, &pipeline_create_info, nil, &result.graphics_pipeline) != .SUCCESS {
         fmt.println("[Vulkan] Failed to create graphics pipeline!");
         assert(false);
     }
+
+    return result;
 }
 
-create_framebuffers:: proc(using vulkan_state: ^Vulkan_State) {
+create_framebuffers:: proc(using vk_ctx: ^Vulkan_Context) {
     
     count:= len(swapchain_images);
     swapchain_framebuffers = make([dynamic]vk.Framebuffer, count, count);
@@ -510,7 +554,7 @@ create_framebuffers:: proc(using vulkan_state: ^Vulkan_State) {
         
         framebuffer_info: vk.FramebufferCreateInfo = {
             sType           = .FRAMEBUFFER_CREATE_INFO,
-            renderPass      = render_pass,
+            renderPass      = pipeline.render_pass,
             attachmentCount = 2,
             pAttachments    = &attachments[0],
             width           = window_extent.width,
@@ -524,40 +568,41 @@ create_framebuffers:: proc(using vulkan_state: ^Vulkan_State) {
     }
 }
 
-create_command_pool:: proc(using vulkan_state: ^Vulkan_State) {
+create_command_pool:: proc(vk_ctx: ^Vulkan_Context, flags: vk.CommandPoolCreateFlags) -> (result: vk.CommandPool) {
     
-    queue_family_indices := find_queue_families(gpu.physical_device, surface);
+    queue_family_indices := find_queue_families(vk_ctx.gpu.physical_device, vk_ctx.surface);
     
     pool_info: vk.CommandPoolCreateInfo = {
         sType = .COMMAND_POOL_CREATE_INFO,
         queueFamilyIndex = queue_family_indices.graphics_family.index,
-        flags = {.RESET_COMMAND_BUFFER}, // Optional
+        flags = flags,
     };
     
-    if vk.CreateCommandPool(gpu.device, &pool_info, nil, &command_pool) != .SUCCESS {
+    if vk.CreateCommandPool(vk_ctx.gpu.device, &pool_info, nil, &result) != .SUCCESS {
         fmt.println("[Vulkan] Failed to create command pool!");
     }
+    return result;
 }
 
-create_command_buffers:: proc(vulkan_state: ^Vulkan_State) {
+create_command_buffers:: proc(using vk_ctx: ^Vulkan_Context) {
     
-    framebuffer_count := len(vulkan_state.swapchain_framebuffers);
-    vulkan_state.command_buffers = make([dynamic]vk.CommandBuffer, framebuffer_count, framebuffer_count);
+    framebuffer_count := len(swapchain_framebuffers);
+    command_buffers = make([dynamic]vk.CommandBuffer, framebuffer_count, framebuffer_count);
     
     alloc_info: vk.CommandBufferAllocateInfo = {
         sType = .COMMAND_BUFFER_ALLOCATE_INFO,
-        commandPool = vulkan_state.command_pool,
+        commandPool = command_pool,
         level = .PRIMARY,
         commandBufferCount = u32(framebuffer_count),
     };
     
-    if vk.AllocateCommandBuffers(vulkan_state.gpu.device, &alloc_info, &vulkan_state.command_buffers[0]) != .SUCCESS {
+    if vk.AllocateCommandBuffers(gpu.device, &alloc_info, &command_buffers[0]) != .SUCCESS {
         fmt.println("[Vulkan] Failed to allocate command buffers!");
     }
     
 }
 
-create_sync_stuff:: proc(using vulkan_state: ^Vulkan_State) {
+create_sync_stuff:: proc(using vk_ctx: ^Vulkan_Context) {
     
     semaphore_create_info: vk.SemaphoreCreateInfo = {
         sType = .SEMAPHORE_CREATE_INFO,
@@ -581,7 +626,7 @@ create_sync_stuff:: proc(using vulkan_state: ^Vulkan_State) {
     }
 }
 
-create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
+create_swapchain:: proc(using vk_ctx: ^Vulkan_Context, window: glfw.WindowHandle) {
     // Creating swap chain
     {
         swapchain_support_info := get_swapchain_support_info(gpu.physical_device, surface);
@@ -658,7 +703,7 @@ create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHa
             oldSwapchain = 0,
         };
         
-        // vulkan_state fields
+        // vk_ctx fields
         window_extent = extent; 
         swapchain_format = chosen_format.format;
         
@@ -695,7 +740,7 @@ create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHa
     }
     // Creating image views
     {
-        vulkan_state.swapchain_image_views = make([dynamic]vk.ImageView, len(swapchain_images), len(swapchain_images));
+        vk_ctx.swapchain_image_views = make([dynamic]vk.ImageView, len(swapchain_images), len(swapchain_images));
         for image_idx := 0; image_idx < len(swapchain_images); image_idx += 1 {
             create_info := vk.ImageViewCreateInfo {
                 sType                 = .IMAGE_VIEW_CREATE_INFO,
@@ -724,7 +769,7 @@ create_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHa
     }
 }
 
-recreate_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
+recreate_swapchain:: proc(using vk_ctx: ^Vulkan_Context, window: glfw.WindowHandle) {
     // Need to wait so that all the resources are not beign used before destroying/freeing.
     vk.DeviceWaitIdle(gpu.device);
 
@@ -735,9 +780,9 @@ recreate_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.Window
 
     vk.FreeCommandBuffers(gpu.device, command_pool, u32(len(command_buffers)), &command_buffers[0]);
 
-    vk.DestroyPipeline(gpu.device, graphics_pipeline, nil);
-    vk.DestroyPipelineLayout(gpu.device, pipeline_layout, nil);
-    vk.DestroyRenderPass(gpu.device, render_pass, nil);
+    vk.DestroyPipeline(gpu.device, pipeline.graphics_pipeline, nil);
+    vk.DestroyPipelineLayout(gpu.device, pipeline.pipeline_layout, nil);
+    vk.DestroyRenderPass(gpu.device, pipeline.render_pass, nil);
 
     for image_view in swapchain_image_views {
         vk.DestroyImageView(gpu.device, image_view, nil);
@@ -754,17 +799,29 @@ recreate_swapchain:: proc(using vulkan_state: ^Vulkan_State, window: glfw.Window
     delete(swapchain_framebuffers);
     delete(command_buffers);
 
-    create_swapchain(vulkan_state, window);
-    create_depthbuffer(vulkan_state, {.DEPTH});
-    create_render_pass(vulkan_state);
-    create_graphics_pipeline(vulkan_state);
-    create_framebuffers(vulkan_state);
-    create_command_pool(vulkan_state);
-    create_command_buffers(vulkan_state);
-    create_sync_stuff(vulkan_state);
+    create_swapchain(vk_ctx, window);
+    create_depthbuffer(vk_ctx, {.DEPTH});
+
+    build_info := PipelineBuildInfo {
+        "vert.spv",
+        "frag.spv",
+    }
+
+    vk_ctx.pipeline = create_graphics_pipeline(vk_ctx, build_info, Vertex);
+
+    build_info = {
+        "vert2D.spv",
+        "frag2D.spv",
+    }
+
+    vk_ctx.pipeline2D = create_graphics_pipeline(vk_ctx, build_info, Vertex2D);
+
+    create_framebuffers(vk_ctx);
+    create_command_buffers(vk_ctx);
+    create_sync_stuff(vk_ctx);
 }
 
-create_image:: proc(using vulkan_state: ^Vulkan_State, frmat: vk.Format, width, height: u32, usage_flags: vk.ImageUsageFlags, memory_flags: vk.MemoryPropertyFlags) -> (image: Image) {
+create_image:: proc(using vk_ctx: ^Vulkan_Context, frmat: vk.Format, width, height: u32, usage_flags: vk.ImageUsageFlags, memory_flags: vk.MemoryPropertyFlags) -> (image: Image) {
 
     image_info: vk.ImageCreateInfo = {
         sType = .IMAGE_CREATE_INFO,
@@ -786,7 +843,7 @@ create_image:: proc(using vulkan_state: ^Vulkan_State, frmat: vk.Format, width, 
 
     mem_requirements: vk.MemoryRequirements;
     vk.GetImageMemoryRequirements(gpu.device, image.image, &mem_requirements);
-    memory := allocate_gpu_memory(&gpu, mem_requirements, memory_flags);
+    memory := gpu_allocate(&gpu, mem_requirements, memory_flags);
 
     image.memory = memory
     vk.BindImageMemory(gpu.device, image.image, image.memory, 0);
@@ -794,14 +851,14 @@ create_image:: proc(using vulkan_state: ^Vulkan_State, frmat: vk.Format, width, 
     return image;
 }
 
-create_depthbuffer:: proc(using vulkan_state: ^Vulkan_State, aspect_flags: vk.ImageAspectFlags) {
+create_depthbuffer:: proc(using vk_ctx: ^Vulkan_Context, aspect_flags: vk.ImageAspectFlags) {
 
     // Depth format is hardcoded to 32 bit float now, may need to check for supported
     // format if this one is unsupported?
     depth_format = .D32_SFLOAT;
 
     // For depth buffer, local memory should be used for performance reasons
-    depth_image = create_image(vulkan_state, depth_format, window_extent.width, window_extent.height, {.DEPTH_STENCIL_ATTACHMENT}, {.DEVICE_LOCAL})
+    depth_image = create_image(vk_ctx, depth_format, window_extent.width, window_extent.height, {.DEPTH_STENCIL_ATTACHMENT}, {.DEVICE_LOCAL})
 
     image_view_info : vk.ImageViewCreateInfo = {
         sType = .IMAGE_VIEW_CREATE_INFO,
@@ -824,7 +881,7 @@ create_depthbuffer:: proc(using vulkan_state: ^Vulkan_State, aspect_flags: vk.Im
 
 }
 
-get_vertex_description:: proc() -> Vertex_Description {
+get_vertex_description:: proc($T: typeid) -> Vertex_Description {
     
 	description: Vertex_Description;
     description.bindings   = make([dynamic]vk.VertexInputBindingDescription, context.temp_allocator);   
@@ -839,7 +896,7 @@ get_vertex_description:: proc() -> Vertex_Description {
     append_elem(&description.bindings, main_binding);
     
     using reflect;
-    type_info := type_info_base(type_info_of(Vertex));
+    type_info := type_info_base(type_info_of(T));
     struct_info := type_info.variant.(Type_Info_Struct);
     
     // position - normal - uv - color
@@ -856,7 +913,7 @@ get_vertex_description:: proc() -> Vertex_Description {
 	return description;
 }
 
-create_sutable_device:: proc(using vulkan_state: ^Vulkan_State) {
+create_sutable_device:: proc(using vk_ctx: ^Vulkan_Context) {
     
     device_count: u32;
     vk.EnumeratePhysicalDevices(instance, &device_count, nil);
@@ -889,6 +946,10 @@ create_sutable_device:: proc(using vulkan_state: ^Vulkan_State) {
         // rendering (useful for VR) can be queried using vkGetPhysicalDeviceFeatures
         device_features: vk.PhysicalDeviceFeatures;
         vk.GetPhysicalDeviceFeatures(gpu.physical_device, &device_features);
+
+        memory_properties: vk.PhysicalDeviceMemoryProperties;
+        vk.GetPhysicalDeviceMemoryProperties(gpu.physical_device, &memory_properties);
+
         
         queue_family_indices := find_queue_families(gpu.physical_device, surface);
         
@@ -935,15 +996,23 @@ create_sutable_device:: proc(using vulkan_state: ^Vulkan_State) {
         
         result := vk.CreateDevice(gpu.physical_device, &device_create_info, nil, &gpu.device);
         assert(result == .SUCCESS);
+
+        gpu.properties.name = str.clone_from_bytes(device_properties.deviceName[:]);
+
+        gpu.properties.heap_count = int(memory_properties.memoryHeapCount);
+        for i := 0; i < gpu.properties.heap_count; i += 1 {
+            gpu.properties.heap_sizes[i] = u64(memory_properties.memoryHeaps[i].size);
+        }
         
         vk.GetDeviceQueue(gpu.device, queue_family_indices.graphics_family.index, 0, &graphics_queue);
         vk.GetDeviceQueue(gpu.device, queue_family_indices.present_family.index, 0, &present_queue);
         
+        print_gpu_info(&gpu);
         break;
     }
 }
 
-get_memory_type_index:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequirements, property_flags: vk.MemoryPropertyFlags) -> u32 {
+get_memory_type_index:: proc(gpu: ^GPU, mem_requirements: vk.MemoryRequirements, property_flags: vk.MemoryPropertyFlags) -> u32 {
     
     mem_properties :vk.PhysicalDeviceMemoryProperties; 
     vk.GetPhysicalDeviceMemoryProperties(gpu.physical_device, &mem_properties);
@@ -965,7 +1034,7 @@ get_memory_type_index:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequir
     return index;
 }
 
-allocate_gpu_memory:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequirements, memory_flags: vk.MemoryPropertyFlags) -> vk.DeviceMemory {
+gpu_allocate:: proc(gpu: ^GPU, mem_requirements: vk.MemoryRequirements, memory_flags: vk.MemoryPropertyFlags) -> vk.DeviceMemory {
     
     result: vk.DeviceMemory;
     
@@ -985,7 +1054,7 @@ allocate_gpu_memory:: proc(gpu: ^GPU_Device, mem_requirements: vk.MemoryRequirem
 }
 
 
-create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.DeviceSize, usage: vk.BufferUsageFlag) -> (buffer: Buffer) {
+create_buffer:: proc(using vk_ctx: ^Vulkan_Context, data: rawptr, size: vk.DeviceSize, usage: vk.BufferUsageFlag) -> (buffer: Buffer) {
     
     buffer_info: vk.BufferCreateInfo;
     mem_requirements: vk.MemoryRequirements;
@@ -1007,7 +1076,7 @@ create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.D
     
     vk.GetBufferMemoryRequirements(gpu.device, staging_buffer, &mem_requirements);
     
-    staging_memory = allocate_gpu_memory(&gpu, mem_requirements, {.HOST_VISIBLE, .HOST_COHERENT});
+    staging_memory = gpu_allocate(&gpu, mem_requirements, {.HOST_VISIBLE, .HOST_COHERENT});
     
     vk.BindBufferMemory(gpu.device, staging_buffer, staging_memory, 0);
     
@@ -1036,7 +1105,7 @@ create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.D
     vk.GetBufferMemoryRequirements(gpu.device, buffer.buffer, &mem_requirements);
     
     // Allocate gpu local memory
-    buffer.memory = allocate_gpu_memory(&gpu, mem_requirements, {.DEVICE_LOCAL});
+    buffer.memory = gpu_allocate(&gpu, mem_requirements, {.DEVICE_LOCAL});
 
     vk.BindBufferMemory(gpu.device, buffer.buffer, buffer.memory, 0);
 
@@ -1045,7 +1114,7 @@ create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.D
     alloc_info: vk.CommandBufferAllocateInfo = {
         sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
         level              = .PRIMARY,
-        commandPool        = command_pool,
+        commandPool        = upload_command_pool,
         commandBufferCount = 1,
     };
 
@@ -1076,9 +1145,12 @@ create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.D
     };
 
     vk.QueueSubmit(graphics_queue, 1, &submit_info, 0);
+
     vk.QueueWaitIdle(graphics_queue);
 
-    vk.FreeCommandBuffers(gpu.device, command_pool, 1, &temp_cmd_buffer);
+    //vk.FreeCommandBuffers(gpu.device, upload_command_pool, 1, &temp_cmd_buffer);
+    // Reset command buffers in command pool
+    vk.ResetCommandPool(gpu.device, upload_command_pool, {.RELEASE_RESOURCES});
 
     vk.DestroyBuffer(gpu.device, staging_buffer, nil);
     vk.FreeMemory(gpu.device, staging_memory, nil);
@@ -1086,7 +1158,7 @@ create_buffer:: proc(using vulkan_state: ^Vulkan_State, data: rawptr, size: vk.D
     return buffer;
 }
 
-vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
+vulkan_init:: proc(using vk_ctx: ^Vulkan_Context, window: glfw.WindowHandle) {
     
     // Instance creation
     {
@@ -1141,9 +1213,11 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
                                                    context.temp_allocator);
         
         vk.EnumerateInstanceLayerProperties(&layer_count, &available_layers[0]);
+
+        validation_layers: []cstring;
         
         when ODIN_DEBUG {
-            validation_layers := []cstring{
+            validation_layers = []cstring{
                 "VK_LAYER_KHRONOS_validation",
             };
             
@@ -1153,14 +1227,14 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
                 
                 for j := 0; j < len(available_layers); j += 1 {
                     length := len(validation_layers[i]);
-                    if mem.compare_byte_ptrs(&available_layers[j].layerName[0], transmute(^byte)validation_layers[i], length) == 0{
+                    if mem.compare_byte_ptrs(&available_layers[j].layerName[0], transmute(^byte)validation_layers[i], length) == 0 {
                         layer_found = true;
                     }
                 }
             }
             assert(layer_found);
         } else {
-            validation_layers :[]cstring= {};
+            validation_layers = []cstring{};
         }
         
         create_info: vk.InstanceCreateInfo = {
@@ -1184,7 +1258,7 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
     } 
     
     
-    setup_debug_messenger(&debug_messenger, instance);
+    create_debug_messenger(&debug_messenger, instance);
     
     
     // Surface creation
@@ -1194,40 +1268,38 @@ vulkan_init:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle)
         assert(false);
     }
     
-    create_sutable_device(vulkan_state);
-    create_swapchain(vulkan_state, window);
-    create_depthbuffer(vulkan_state, {.DEPTH});
-    create_render_pass(vulkan_state);
-    create_graphics_pipeline(vulkan_state);
-    create_framebuffers(vulkan_state);
-    create_command_pool(vulkan_state);
-    create_command_buffers(vulkan_state);
-    create_sync_stuff(vulkan_state);
-    // triangle_mesh.vertices = make([dynamic]Vertex, 3);
-    // triangle_mesh.vertices[0].pos = { 1,  1, 0}; 
-    // triangle_mesh.vertices[1].pos = {-1,  1, 0}; 
-    // triangle_mesh.vertices[2].pos = { 0, -1, 0}; 
-    // triangle_mesh.vertices[0].color = {0.1, 0.2, 0.0};
-    // triangle_mesh.vertices[1].color = {0.1, 0.2, 0.0};
-    // triangle_mesh.vertices[2].color = {0.1, 0.2, 0.0};
-    
-    some_mesh = obj_read("assets/monkey.obj");
+    create_sutable_device(vk_ctx);
+    create_swapchain(vk_ctx, window);
+    create_depthbuffer(vk_ctx, {.DEPTH});
 
-    for vertex, idx in some_mesh.vertices {
-        some_mesh.vertices[idx].color = vertex.normal;
+    build_info := PipelineBuildInfo {
+        "vert.spv",
+        "frag.spv",
     }
 
-    size := vk.DeviceSize(len(some_mesh.vertices) * size_of(Vertex));
-    vertex_buffer = create_buffer(vulkan_state, &some_mesh.vertices[0], size, .VERTEX_BUFFER);
+    vk_ctx.pipeline = create_graphics_pipeline(vk_ctx, build_info, Vertex);
 
-    size  = vk.DeviceSize(len(some_mesh.indices) * size_of(u32));
-    index_buffer = create_buffer(vulkan_state, &some_mesh.indices[0], size, .INDEX_BUFFER);
+    build_info = {
+        "vert2D.spv",
+        "frag2D.spv",
+    }
+
+    vk_ctx.pipeline2D = create_graphics_pipeline(vk_ctx, build_info, Vertex2D);
+
+    create_framebuffers(vk_ctx);
+
+    vk_ctx.command_pool = create_command_pool(vk_ctx, {.RESET_COMMAND_BUFFER});
+    vk_ctx.upload_command_pool = create_command_pool(vk_ctx, {.RESET_COMMAND_BUFFER});
+
+    create_command_buffers(vk_ctx);
+    create_sync_stuff(vk_ctx);
+    
 }
 
-draw_frame:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) {
+draw_frame:: proc(using vk_ctx: ^Vulkan_Context, window: glfw.WindowHandle) {
     
     if (framebuffer_resized) {
-        recreate_swapchain(vulkan_state, window)
+        recreate_swapchain(vk_ctx, window)
         framebuffer_resized = false;
         return;
     }
@@ -1264,12 +1336,12 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) 
     clear_values : []vk.ClearValue = {color_clear_value, depth_clear_value};
     render_pass_info: vk.RenderPassBeginInfo = { 
         sType            = .RENDER_PASS_BEGIN_INFO,
-        renderPass       = vulkan_state.render_pass,
-        framebuffer      = vulkan_state.swapchain_framebuffers[image_index],
+        renderPass       = pipeline.render_pass,
+        framebuffer      = swapchain_framebuffers[image_index],
         
         renderArea       = {
             offset = {0, 0},
-            extent = vulkan_state.window_extent,
+            extent = vk_ctx.window_extent,
         },
         clearValueCount  = 2,
         pClearValues     = &clear_values[0],
@@ -1277,7 +1349,7 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) 
     
     vk.CmdBeginRenderPass(cmd_buffer, &render_pass_info, .INLINE);
     
-    vk.CmdBindPipeline(cmd_buffer, .GRAPHICS, graphics_pipeline);
+    vk.CmdBindPipeline(cmd_buffer, .GRAPHICS, pipeline.graphics_pipeline);
     
     offset: []vk.DeviceSize = {0};
     vk.CmdBindVertexBuffers(cmd_buffer, 0, 1, &vertex_buffer.buffer, &offset[0]);
@@ -1285,19 +1357,16 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) 
     vk.CmdBindIndexBuffer(cmd_buffer, index_buffer.buffer, 0, .UINT32);
 
     // Computing push constants
-    cam_pos: vec3 = {0, 0, -2};
-
-    view := la.matrix4_translate(cam_pos)
-    projection := la.matrix4_perspective_f32(math.to_radians_f32(90), 640.0/480.0, 0.1, 1000);
-    model := la.matrix4_rotate(math.to_radians_f32(20.0), vec3{0, 1, 0});
-    mesh_matrix := la.matrix_mul(la.matrix_mul(projection, view), model);
-
+    cam_pos: vec3 = {0,  0, -2};
 
     push_constants: Push_Constants;
-    push_constants.render_matrix = mesh_matrix;
 
+    view := la.matrix4_translate(cam_pos)
+    projection := la.matrix4_perspective_f32(math.to_radians_f32(90.0), 640.0/480.0, 0.1, 1000.0);
+    push_constants.model = la.matrix4_rotate(math.to_radians_f32(20.0), vec3{0, 1, 0});
+    push_constants.view_projection = la.matrix_mul(projection, view);
 
-    vk.CmdPushConstants(cmd_buffer, pipeline_layout, {.VERTEX}, 0, size_of(Push_Constants), &push_constants)
+    vk.CmdPushConstants(cmd_buffer, pipeline.pipeline_layout, {.VERTEX}, 0, size_of(Push_Constants), &push_constants)
     
     vk.CmdDrawIndexed(cmd_buffer, u32(len(some_mesh.indices)), 1, 0, 0, 0);
     
@@ -1319,11 +1388,9 @@ draw_frame:: proc(using vulkan_state: ^Vulkan_State, window: glfw.WindowHandle) 
         pSignalSemaphores = &render_semaphore,
     };
     
-    
     if (vk.QueueSubmit(graphics_queue, 1, &submit_info, render_fence) != .SUCCESS) {
         fmt.println("[Vulkan] Failed to submit draw command buffer!");
     }
-    
     
     present_info: vk.PresentInfoKHR = {
         sType              = .PRESENT_INFO_KHR,
@@ -1344,13 +1411,40 @@ megabytes:: proc(n: int) -> int {
 
 glfw_framebuffer_size_callback:: proc "c" (window: glfw.WindowHandle, width, height: c.int) {
 
-    vulkan_state : = cast(^Vulkan_State)glfw.GetWindowUserPointer(window);
-    vulkan_state.framebuffer_resized = true;
+    vk_ctx : = cast(^Vulkan_Context)glfw.GetWindowUserPointer(window);
+    vk_ctx.framebuffer_resized = true;
+}
+
+vk_draw_rect:: proc(using vk_ctx: ^Vulkan_Context, pos: vec2, size: vec2, color: Color) {
+
+    rect_vertices := []vec2 {
+        vec2{-0.5, -0.5},
+        vec2{ 0.5, -0.5},
+        vec2{ 0.5,  0.5},
+        vec2{-0.5,  0.5},
+    };
+
+    rect_indices := []u32 {
+        0, 1, 2,
+        0, 2, 3,
+    };
+
+    for i in 0..6 {
+        indices[i + index_count] = u32(vertex_count) + rect_indices[i];
+    }
+
+    for i in 0..4 {
+        vertices[i + vertex_count].pos = rect_vertices[i];
+        vertices[i + vertex_count].color = color;
+        // TODO: UV's
+        vertices[i + vertex_count].uv = vec2{0, 0};
+        vertex_count += 1;
+    }
 }
 
 main :: proc() {
     
-    vulkan_state : ^Vulkan_State = new(Vulkan_State);
+    vk_ctx : ^Vulkan_Context = new(Vulkan_Context);
     window: glfw.WindowHandle;
     
     if (glfw.Init() == 0) {
@@ -1358,13 +1452,13 @@ main :: proc() {
     }
 
     glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API);
-    //glfw.WindowHint(glfw.RESIZABLE, 0);
 
     window = glfw.CreateWindow(1366, 768, "Vulkan", nil, nil);
-    glfw.SetFramebufferSizeCallback(window, glfw_framebuffer_size_callback);
-    glfw.SetWindowUserPointer(window, vulkan_state);
 
-    vulkan_init(vulkan_state, window);
+    glfw.SetFramebufferSizeCallback(window, glfw_framebuffer_size_callback);
+    glfw.SetWindowUserPointer(window, vk_ctx);
+
+    vulkan_init(vk_ctx, window);
     
     if (window == nil) {
         fmt.println("Failed to create glfw window.");
@@ -1375,10 +1469,20 @@ main :: proc() {
         fmt.println("Vulkan is unsuported.");
         glfw.Terminate();
     }
+
+    vk_ctx.some_mesh = obj_read("assets/monkey.obj");
+
+    size := vk.DeviceSize(len(vk_ctx.some_mesh.vertices) * size_of(Vertex));
+    vk_ctx.vertex_buffer = create_buffer(vk_ctx, &vk_ctx.some_mesh.vertices[0], size, .VERTEX_BUFFER);
+
+    size  = vk.DeviceSize(len(vk_ctx.some_mesh.indices) * size_of(u32));
+    vk_ctx.index_buffer = create_buffer(vk_ctx, &vk_ctx.some_mesh.indices[0], size, .INDEX_BUFFER);
     
     for (!glfw.WindowShouldClose(window)) {
         glfw.PollEvents();
-        draw_frame(vulkan_state, window);
+        //draw_rect(vk_ctx, {0, 0}, {100, 100}, {1, 0, 0, 1});
+        //draw_rect(vk_ctx, {100, 100}, {100, 100}, {1, 1, 0, 1});
+        draw_frame(vk_ctx, window);
     }
 
     glfw.Terminate();

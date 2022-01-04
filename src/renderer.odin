@@ -8,22 +8,30 @@ vec2 :: la.Vector2f32;
 mat4 :: la.Matrix4f32;
 
 Vertex :: struct {
-    pos  : vec3,
-    normal: vec3,
-    uv: vec2,
-    color: vec3,
+    pos    : vec3,
+    normal : vec3,
+    uv     : vec2,
+    color  : Color,
+}
+
+Vertex2D :: struct {
+    pos      : vec2,
+    uv       : vec2,
+    color    : Color,
 }
 
 Mesh :: struct {
-    vertices: [dynamic]Vertex,
-    indices: [dynamic]u32,
-    
-    handle: Handle,
+    vertices : [dynamic]Vertex,
+    indices  :  [dynamic]u32,
 }
 
 Push_Constants :: struct {
-    data: vec4,
-    render_matrix: mat4,
+    model           : mat4,
+    view_projection : mat4,
 }
 
-Handle :: distinct u64;
+
+Color :: distinct vec4
+
+draw_rect : proc(pos: vec2, size: vec2, color: Color)
+
