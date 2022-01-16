@@ -79,7 +79,7 @@ obj_read:: proc(file_name: string) -> (mesh: Mesh) {
                         vertex.pos    = obj_positions[face.position_indices[i]];
                         vertex.normal = obj_normals[face.normal_indices[i]]; 
                         vertex.uv     = obj_uvs[face.uv_indices[i]];
-                        vertex.color  = {1,1,1,1};
+                        vertex.color  = {0.7,0.2,0.2,1};
                         
                         append_elem(&mesh.vertices, vertex);
                     }

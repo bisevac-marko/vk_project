@@ -20,6 +20,29 @@ Vertex_Description :: struct {
     flags: vk.PipelineVertexInputStateCreateFlags,
 }
 
+Memory_Type :: enum
+{
+    IMAGE,
+    BUFFER,
+}
+
+Memory :: struct {
+    id : vk.DeviceMemory,
+    size: int,
+    offset : vk.DeviceSize,
+    block: ^MemoryBlock,
+}
+
+MemoryBlock :: struct {
+    memory : vk.DeviceMemory,
+    size   : int,
+    offset : int,
+    mem_type_index: u32,
+    type : Memory_Type,
+
+    next: ^MemoryBlock,
+}
+
 GPU_Properties :: struct {
     name: string,
     heap_count: int,
@@ -30,17 +53,16 @@ GPU :: struct {
     device: vk.Device,
     physical_device: vk.PhysicalDevice,
     properties: GPU_Properties,
+    memory: MemoryBlock,
 }
 
 Buffer :: struct {
-    memory: vk.DeviceMemory,
+    memory: Memory,
     buffer: vk.Buffer,
-
 }
 
-
 Image :: struct {
-    memory: vk.DeviceMemory,
+    memory: Memory,
     image: vk.Image,
 }
 
@@ -97,6 +119,7 @@ Vulkan_Context :: struct {
     depth_image: Image,
     depth_image_view: vk.ImageView,
     depth_format: vk.Format,
+
     
     vertices: [4096]Vertex2D,
     vertex_count: int,
@@ -836,17 +859,16 @@ create_image:: proc(using vk_ctx: ^Vulkan_Context, frmat: vk.Format, width, heig
         usage = usage_flags,
     };
 
-
    if vk.CreateImage(gpu.device, &image_info, nil, &image.image) != .SUCCESS {
         fmt.println("[Vulkan] Failed to create image!");
     }
 
     mem_requirements: vk.MemoryRequirements;
     vk.GetImageMemoryRequirements(gpu.device, image.image, &mem_requirements);
-    memory := gpu_allocate(&gpu, mem_requirements, memory_flags);
 
-    image.memory = memory
-    vk.BindImageMemory(gpu.device, image.image, image.memory, 0);
+    image.memory = gpu_alloc_image(&gpu, mem_requirements, memory_flags);
+
+    vk.BindImageMemory(gpu.device, image.image, image.memory.id, image.memory.offset);
 
     return image;
 }
@@ -1034,60 +1056,104 @@ get_memory_type_index:: proc(gpu: ^GPU, mem_requirements: vk.MemoryRequirements,
     return index;
 }
 
-gpu_allocate:: proc(gpu: ^GPU, mem_requirements: vk.MemoryRequirements, memory_flags: vk.MemoryPropertyFlags) -> vk.DeviceMemory {
-    
-    result: vk.DeviceMemory;
+gpu_free:: proc(memory: Memory) {
+
+    assert((memory.block.offset - memory.size) == int(memory.offset));
+    memory.block.offset -= memory.size;
+}
+
+gpu_alloc_buffer:: proc(gpu: ^GPU, mem_requirements: vk.MemoryRequirements, memory_flags: vk.MemoryPropertyFlags) -> (result: Memory) {
+    result = gpu_allocate(gpu, mem_requirements, memory_flags, .BUFFER);
+    return result;
+}
+
+gpu_alloc_image:: proc(gpu: ^GPU, mem_requirements: vk.MemoryRequirements, memory_flags: vk.MemoryPropertyFlags) -> (result: Memory) {
+    result = gpu_allocate(gpu, mem_requirements, memory_flags, .IMAGE);
+    return result;
+}
+
+gpu_allocate:: proc(gpu: ^GPU, mem_requirements: vk.MemoryRequirements, memory_flags: vk.MemoryPropertyFlags, mem_type: Memory_Type) -> (result: Memory) {
     
     mem_type_index := get_memory_type_index(gpu, mem_requirements, memory_flags);
-    
+    size := int(mem_requirements.size);
+    block_size := megabytes(64);
+
     alloc_info: vk.MemoryAllocateInfo = {
         sType = .MEMORY_ALLOCATE_INFO,
-        allocationSize = mem_requirements.size,
+        allocationSize = vk.DeviceSize(block_size),
         memoryTypeIndex = mem_type_index,
     };
-    
-    if vk.AllocateMemory(gpu.device, &alloc_info, nil, &result) != .SUCCESS {
-        fmt.println("[Vulkan] Failed to allocate buffer!");
+
+    assert(size < megabytes(64));
+
+    // if its first allocation
+    if (gpu.memory.size == 0) {
+
+        if vk.AllocateMemory(gpu.device, &alloc_info, nil, &gpu.memory.memory) != .SUCCESS {
+            fmt.println("[Vulkan] Failed to allocate buffer!");
+        }
+
+        gpu.memory.size = block_size;
+        gpu.memory.mem_type_index = mem_type_index;
+        gpu.memory.offset = 0;
+        gpu.memory.type = mem_type;
+        gpu.memory.next = nil;
     }
-    
+
+    mem_block := &gpu.memory;
+
+    for ;; {
+        if (mem_block.mem_type_index == mem_type_index && mem_block.type == mem_type) {
+
+                alignment := int(mem_requirements.alignment);
+                difference := alignment - mem_block.offset % alignment;
+                available_size := mem_block.size - (difference + mem_block.offset);
+
+                if (available_size >= size) {
+
+                    if (difference != 0) {
+                        mem_block.offset += difference;
+                    }
+
+                    result.id = mem_block.memory;
+                    result.size = size;
+                    result.offset = vk.DeviceSize(mem_block.offset);
+                    result.block = mem_block;
+
+                    mem_block.offset += size;
+                }
+
+                break;
+        }
+
+        if (mem_block.next == nil) {
+
+            mem_block.next = new(MemoryBlock);
+
+            memory: vk.DeviceMemory;
+            if vk.AllocateMemory(gpu.device, &alloc_info, nil, &memory) != .SUCCESS {
+                fmt.println("[Vulkan] Failed to allocate buffer!");
+            }
+
+            mem_block.next.memory = memory;
+            mem_block.next.type = mem_type;
+            mem_block.next.offset = 0;
+            mem_block.next.size = int(alloc_info.allocationSize);
+            mem_block.next.mem_type_index = mem_type_index;
+        }
+        mem_block = mem_block.next;
+    }
+
     return result;
 }
 
 
 create_buffer:: proc(using vk_ctx: ^Vulkan_Context, data: rawptr, size: vk.DeviceSize, usage: vk.BufferUsageFlag) -> (buffer: Buffer) {
     
-    buffer_info: vk.BufferCreateInfo;
-    mem_requirements: vk.MemoryRequirements;
-    staging_buffer: vk.Buffer;
-    staging_memory: vk.DeviceMemory;
-
-    // Staging buffer info
-    buffer_info = {
-        sType       = .BUFFER_CREATE_INFO,
-        size        = size,
-        usage       = {.TRANSFER_SRC},
-        sharingMode = .EXCLUSIVE,
-    };
-
-    // Create staging buffer
-    if vk.CreateBuffer(gpu.device, &buffer_info, nil, &staging_buffer) != .SUCCESS {
-        fmt.println("[Vulkan] Failed to create buffer!");
-    }
-    
-    vk.GetBufferMemoryRequirements(gpu.device, staging_buffer, &mem_requirements);
-    
-    staging_memory = gpu_allocate(&gpu, mem_requirements, {.HOST_VISIBLE, .HOST_COHERENT});
-    
-    vk.BindBufferMemory(gpu.device, staging_buffer, staging_memory, 0);
-    
-    gpu_data: rawptr;
-    vk.MapMemory(gpu.device, staging_memory, 0, buffer_info.size, {}, &gpu_data);
-    
-    mem.copy(gpu_data, data, int(buffer_info.size));
-    
-    vk.UnmapMemory(gpu.device, staging_memory);
-
-    // ------------------------------------------
+    buffer_info      : vk.BufferCreateInfo;
+    mem_requirements : vk.MemoryRequirements;
+    staging_buffer   : vk.Buffer;
+    staging_memory   : Memory;
 
     // Main buffer info
     buffer_info = {
@@ -1105,11 +1171,40 @@ create_buffer:: proc(using vk_ctx: ^Vulkan_Context, data: rawptr, size: vk.Devic
     vk.GetBufferMemoryRequirements(gpu.device, buffer.buffer, &mem_requirements);
     
     // Allocate gpu local memory
-    buffer.memory = gpu_allocate(&gpu, mem_requirements, {.DEVICE_LOCAL});
+    buffer.memory = gpu_alloc_buffer(&gpu, mem_requirements, {.DEVICE_LOCAL});
 
-    vk.BindBufferMemory(gpu.device, buffer.buffer, buffer.memory, 0);
+    vk.BindBufferMemory(gpu.device, buffer.buffer, buffer.memory.id, buffer.memory.offset);
+    // ----------------------------------------
 
-    // Copy staging buffer to main gpu buffer
+    // Staging buffer info
+    buffer_info = {
+        sType       = .BUFFER_CREATE_INFO,
+        size        = size,
+        usage       = {.TRANSFER_SRC},
+        sharingMode = .EXCLUSIVE,
+    };
+
+    // Create staging buffer
+    if vk.CreateBuffer(gpu.device, &buffer_info, nil, &staging_buffer) != .SUCCESS {
+        fmt.println("[Vulkan] Failed to create buffer!");
+    }
+    
+    vk.GetBufferMemoryRequirements(gpu.device, staging_buffer, &mem_requirements);
+    
+    staging_memory = gpu_alloc_buffer(&gpu, mem_requirements, {.HOST_VISIBLE, .HOST_COHERENT});
+    
+    vk.BindBufferMemory(gpu.device, staging_buffer, staging_memory.id, staging_memory.offset);
+    
+    gpu_data: rawptr;
+    vk.MapMemory(gpu.device, staging_memory.id, buffer.memory.offset, buffer_info.size, {}, &gpu_data);
+    
+    mem.copy(gpu_data, data, int(buffer_info.size));
+    
+    vk.UnmapMemory(gpu.device, staging_memory.id);
+
+    // ------------------------------------------
+
+    // Copy staging buffer to gpu local buffer
 
     alloc_info: vk.CommandBufferAllocateInfo = {
         sType              = .COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1153,7 +1248,8 @@ create_buffer:: proc(using vk_ctx: ^Vulkan_Context, data: rawptr, size: vk.Devic
     vk.ResetCommandPool(gpu.device, upload_command_pool, {.RELEASE_RESOURCES});
 
     vk.DestroyBuffer(gpu.device, staging_buffer, nil);
-    vk.FreeMemory(gpu.device, staging_memory, nil);
+    //vk.FreeMemory(gpu.device, staging_memory, nil);
+    //gpu_free(staging_memory);
 
     return buffer;
 }
@@ -1172,13 +1268,13 @@ vulkan_init:: proc(using vk_ctx: ^Vulkan_Context, window: glfw.WindowHandle) {
         };
         
         when ODIN_OS == "windows" {
-            instance_extensions := [?]cstring{
+            instance_extensions := []cstring{
                 "VK_KHR_surface",
                 "VK_KHR_win32_surface",
                 "VK_EXT_debug_utils",
             };
         } else when ODIN_OS == "linux" {
-            instance_extensions := [?]cstring{
+            instance_extensions := []cstring{
                 "VK_KHR_surface",
                 // TODO(mb): Linux surface extension
                 "VK_EXT_debug_utils",
@@ -1405,9 +1501,6 @@ draw_frame:: proc(using vk_ctx: ^Vulkan_Context, window: glfw.WindowHandle) {
     vk.QueuePresentKHR(present_queue, &present_info);
 }
 
-megabytes:: proc(n: int) -> int {
-    return n * 1024 * 1024;
-}
 
 glfw_framebuffer_size_callback:: proc "c" (window: glfw.WindowHandle, width, height: c.int) {
 
