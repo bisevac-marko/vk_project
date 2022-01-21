@@ -56,9 +56,15 @@ GPU :: struct {
     memory: MemoryBlock,
 }
 
+Buffer_Type :: enum {
+    VERTEX,
+    INDEX,
+}
+
 Buffer :: struct {
     memory: Memory,
     buffer: vk.Buffer,
+    type: Buffer_Type,
 }
 
 Image :: struct {
@@ -90,7 +96,10 @@ Vulkan_Context :: struct {
     present_queue: vk.Queue,
     
     vertex_buffer: Buffer,
-    index_buffer: Buffer,
+    index_buffer : Buffer,
+
+    vertex_buffer2D: Buffer,
+    index_buffer2D : Buffer,
     
     surface: vk.SurfaceKHR,
     
@@ -126,8 +135,6 @@ Vulkan_Context :: struct {
 
     indices: [4096]u32,
     index_count: int,
-
-    some_mesh: Mesh,
 }
 
 Swap_Chain_Support_Info :: struct {
@@ -1147,9 +1154,21 @@ gpu_allocate:: proc(gpu: ^GPU, mem_requirements: vk.MemoryRequirements, memory_f
     return result;
 }
 
+buffer_type_to_usage_flag:: proc(type: Buffer_Type) -> (result: vk.BufferUsageFlag) {
+    switch type {
+        case .INDEX:
+            return .INDEX_BUFFER;
+        case .VERTEX:
+            return .VERTEX_BUFFER;
+        case:
+            fmt.println("[Vulkan] Unsuported buffer type!");
+    }
 
-create_buffer:: proc(using vk_ctx: ^Vulkan_Context, data: rawptr, size: vk.DeviceSize, usage: vk.BufferUsageFlag) -> (buffer: Buffer) {
-    
+    return result;
+}
+
+create_buffer:: proc(using vk_ctx: ^Vulkan_Context, data: rawptr, size: vk.DeviceSize, type: Buffer_Type) -> (buffer: Buffer) {
+
     buffer_info      : vk.BufferCreateInfo;
     mem_requirements : vk.MemoryRequirements;
     staging_buffer   : vk.Buffer;
@@ -1159,7 +1178,7 @@ create_buffer:: proc(using vk_ctx: ^Vulkan_Context, data: rawptr, size: vk.Devic
     buffer_info = {
         sType       = .BUFFER_CREATE_INFO,
         size        = size,
-        usage       = {usage, .TRANSFER_DST},
+        usage       = {buffer_type_to_usage_flag(type), .TRANSFER_DST},
         sharingMode = .EXCLUSIVE,
     };
 
@@ -1249,7 +1268,9 @@ create_buffer:: proc(using vk_ctx: ^Vulkan_Context, data: rawptr, size: vk.Devic
 
     vk.DestroyBuffer(gpu.device, staging_buffer, nil);
     //vk.FreeMemory(gpu.device, staging_memory, nil);
+    // TODO: free stagin buffer!
     //gpu_free(staging_memory);
+    buffer.type = type;
 
     return buffer;
 }
@@ -1563,13 +1584,19 @@ main :: proc() {
         glfw.Terminate();
     }
 
-    vk_ctx.some_mesh = obj_read("assets/monkey.obj");
+    // Read obj
+    mesh := obj_read("assets/monkey.obj");
+    defer obj_free(&mesh);
 
-    size := vk.DeviceSize(len(vk_ctx.some_mesh.vertices) * size_of(Vertex));
-    vk_ctx.vertex_buffer = create_buffer(vk_ctx, &vk_ctx.some_mesh.vertices[0], size, .VERTEX_BUFFER);
+    // Create vertex and index buffer from it
+    size := vk.DeviceSize(len(mesh.vertices) * size_of(Vertex));
+    vk_ctx.vertex_buffer = create_buffer(vk_ctx, &mesh.vertices[0], size, .VERTEX);
 
-    size  = vk.DeviceSize(len(vk_ctx.some_mesh.indices) * size_of(u32));
-    vk_ctx.index_buffer = create_buffer(vk_ctx, &vk_ctx.some_mesh.indices[0], size, .INDEX_BUFFER);
+    size  = vk.DeviceSize(len(mesh.indices) * size_of(u32));
+    vk_ctx.index_buffer = create_buffer(vk_ctx, &mesh.indices[0], size, .INDEX);
+
+    size  = vk.DeviceSize(megabytes(16));
+    vk_ctx.vertex_buffer2D = create_buffer(vk_ctx, )
     
     for (!glfw.WindowShouldClose(window)) {
         glfw.PollEvents();

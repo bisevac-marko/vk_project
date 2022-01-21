@@ -24,6 +24,11 @@ OBJ_Face :: struct {
     uv_indices      : [3]u64,
 }
 
+obj_free:: proc(mesh: ^Mesh) {
+    delete(mesh.indices);
+    delete(mesh.vertices);
+}
+
 obj_read:: proc(file_name: string) -> (mesh: Mesh) {
     
     buf, ok := os.read_entire_file(file_name, context.temp_allocator);

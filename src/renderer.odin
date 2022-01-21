@@ -30,6 +30,18 @@ Push_Constants :: struct {
     view_projection : mat4,
 }
 
+GameObject :: struct {
+    mesh : Mesh,
+    model: mat4,
+}
+
+new_gameobject:: proc(mesh: Mesh) -> (result: GameObject) {
+    go: GameObject;
+    go.mesh = mesh;
+    go.model = la.identity(mat4);
+    return go;
+}
+
 
 Color :: distinct vec4
 
