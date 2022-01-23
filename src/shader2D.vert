@@ -14,6 +14,6 @@ layout(push_constant) uniform constants
 
 void main() {
     color = a_color;
-    gl_Position = PC.model * vec4(a_pos, 0.0f, 1.0f);
+    gl_Position = PC.view_projection * vec4(a_pos, 0.0f, 1.0f);
 }
    
